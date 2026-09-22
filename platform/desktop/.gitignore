@@ -1,0 +1,59 @@
+# Miscellaneous
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+.build/
+.buildlog/
+.history
+.svn/
+.swiftpm/
+migrate_working_dir/
+
+# IntelliJ related
+*.iml
+*.ipr
+*.iws
+.idea/
+
+# The .vscode folder contains launch configuration and tasks you configure in
+# VS Code which you may wish to be included in version control, so this line
+# is commented out by default.
+#.vscode/
+
+# Flutter/Dart/Pub related
+**/doc/api/
+**/ios/Flutter/.last_build_id
+.dart_tool/
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+/build/
+/coverage/
+
+# --- WebHTV 桌面端专用 ---
+# 备用构建目录（全局 flutter config 曾指向 build_c，实际构建用 build/）
+/build_c/
+# 打包输出
+/dist/
+# 构建期依赖包缓存（ANGLE.7z / libmpv，可从镜像重新获取）
+/.deps-cache/
+# Flutter 工具状态（会出现在 CWD，勿提交）
+/.flutter
+/.flutter_settings
+/.flutter_tool_state
+# Node 运行时（87 MB，不进仓库；由 scripts/deploy_node.sh 部署）
+/assets/runtime/node.exe
+
+# Symbolication related
+app.*.symbols
+
+# Obfuscation related
+app.*.map.json
+
+# Android Studio will place build artifacts here
+/android/app/debug
+/android/app/profile
+/android/app/release

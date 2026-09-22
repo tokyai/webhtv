@@ -1,0 +1,61 @@
+name: webhtv_win
+description: "WebHTV 桌面端（Windows）— 通过添加源地址引入播放源，不自带任何内置源。界面按 PeekPili 复刻。"
+publish_to: 'none'
+
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.11.4
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  cupertino_icons: ^1.0.8
+
+  # 状态管理（界面层与 PeekPili 同源，依赖 provider）
+  provider: ^6.1.2
+
+  # HTTP：拉取 .md5 指针与源正文（需手动处理 302）
+  http: ^1.2.2
+
+  # PeekPili 界面层自带的网络客户端（lib/core/http.dart 用 dio；
+  # 自定义 UA 与「500 也读 body」的契约都靠它）
+  dio: ^5.7.0
+
+  # md5 校验（源正文与 .md5 指针比对）
+  crypto: ^3.0.6
+
+  # 本地持久化：与 PeekPili 一致的 Hive 盒子
+  hive: ^2.2.3
+  hive_flutter: ^1.1.0
+
+  # 路径：定位可写数据目录
+  path_provider: ^2.1.5
+  path: ^1.9.0
+
+  # 播放器（Windows 走 libmpv / media_kit）
+  media_kit: ^1.1.11
+  media_kit_video: ^1.2.5
+  media_kit_libs_video: ^1.0.5
+
+  # 播放期间保持屏幕常亮（PeekPili 播放页用）
+  wakelock_plus: ^1.2.10
+
+  # 海报图缓存（PeekPili 的 PosterCard / 详情页依赖）
+  cached_network_image: ^3.4.1
+
+  # 用系统默认程序打开源工作目录 / 网页
+  url_launcher: ^6.3.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
+
+  assets:
+    - assets/images/logo/
