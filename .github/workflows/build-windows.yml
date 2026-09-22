@@ -1,0 +1,213 @@
+name: Build Windows (reusable)
+
+# 可复用的 Windows 桌面端构建单元 —— 只构建并收集产物，不做发布。
+#
+# ## 在 CI 上跑本仓库的 Windows 打包脚本要注意什么
+#
+# `platform/desktop/scripts/*.sh` 是**为本地开发机（PortableGit）写的**，
+# 里面有针对本机环境的补丁。在 `windows-latest` runner 上它们大多是**无害
+# 的幂等操作**，可以直接复用（这是刻意的：CI 与本地走同一条路径，
+# 避免「本地能出包、CI 出不了」的分叉）。
+#
+# 逐个说明为什么无害：
+#
+#   1. `fix_plugin_symlinks.sh` —— 清空 `.plugin_symlinks` 让 Flutter 重建。
+#      runner 上目录本就干净，清空是空操作。
+#   2. `prefetch_media_deps.sh` —— 从镜像预取 ANGLE.7z / libmpv。runner 上
+#      会**真的去下**（本地是走缓存）。脚本失败不中断，CMake 自身也有
+#      兜底下载，因此最坏情况是慢，不会失败。
+#   3. 环境变量注入（ProgramFiles 等）—— runner 上这些变量**本来就有**，
+#      注入只是覆盖成同样的值。
+#
+# 唯一的真问题是 `deploy_node.sh` 需要 `assets/runtime/node.exe`，
+# 而该文件被 `.gitignore` 忽略（87 MB 不适合入库）。解法见下方
+# "Provision node.exe" 步骤：从官方源下载**指定版本**，保证与本地一致。
+
+on:
+  workflow_call:
+    inputs:
+      release_tag:
+        description: "Release tag（用于产物命名）"
+        required: true
+        type: string
+      node_version:
+        description: "随包分发的 Node 版本（须与本地 assets/runtime/node.exe 一致）"
+        required: false
+        default: "22.22.2"
+        type: string
+    outputs:
+      desktop_version:
+        description: "桌面端版本（pubspec version）"
+        value: ${{ jobs.build.outputs.desktop_version }}
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag（留空则用 v<desktop version>）"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  TZ: Asia/Shanghai
+  APP_DIR: platform/desktop
+
+jobs:
+  build:
+    name: Build Windows desktop
+    runs-on: windows-latest
+    timeout-minutes: 120
+
+    outputs:
+      desktop_version: ${{ steps.version.outputs.desktop_version }}
+
+    # 默认是 pwsh；本仓库所有脚本都是 bash 写的，必须显式指定。
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.41.6'
+          channel: stable
+          cache: true
+
+      - name: Show toolchain versions
+        run: |
+          flutter --version
+          echo "--- cmake ---"
+          cmake --version | head -1
+
+      - name: Resolve desktop version
+        id: version
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          VERSION="$(grep -m1 '^version:' pubspec.yaml | sed 's/version: *//' | tr '+' '-')"
+          echo "desktop_version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "桌面端版本: $VERSION"
+
+      # 下载官方 Node 到 assets/runtime/node.exe。
+      #
+      # 为什么指定版本而不从 runner PATH 取：
+      #   `deploy_node.sh` 有 PATH 兜底，但 runner 预装的 Node 版本会随镜像
+      #   更新而变，打进包里的运行时版本就不可复现了。源服务（drpyS）对
+      #   Node 版本有实际要求，因此这里锁死版本，与本地资产保持一致。
+      - name: Provision node.exe
+        working-directory: ${{ env.APP_DIR }}
+        env:
+          NODE_VERSION: ${{ inputs.node_version }}
+        run: |
+          set -euo pipefail
+          mkdir -p assets/runtime
+
+          if [ -f assets/runtime/node.exe ]; then
+            echo "已存在 assets/runtime/node.exe（来自仓库或缓存），跳过下载"
+          else
+            URL="https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-win-x64.zip"
+            echo "下载 $URL"
+            curl -L --fail --retry 3 --retry-all-errors --connect-timeout 20 \
+              -o node-win.zip "$URL"
+
+            # 完整性自检：zip 结构与 node.exe 存在性
+            unzip -o node-win.zip "node-v${NODE_VERSION}-win-x64/node.exe" -d node-extract
+            cp "node-extract/node-v${NODE_VERSION}-win-x64/node.exe" assets/runtime/node.exe
+            rm -rf node-win.zip node-extract
+          fi
+
+          ls -l assets/runtime/node.exe
+          # 版本自检 —— 与本地资产必须一致
+          ACTUAL="$(./assets/runtime/node.exe --version)"
+          echo "node.exe 版本: $ACTUAL"
+          if [ "$ACTUAL" != "v${NODE_VERSION}" ]; then
+            echo "::error title=Node version mismatch::expected v${NODE_VERSION}, got $ACTUAL"
+            exit 1
+          fi
+
+      # 走与本地完全相同的打包入口。
+      # `package_windows.sh` 内部会调 build_windows.sh（编译）+
+      # deploy_node.sh（铺 node）并做 15 项产物校验。
+      - name: Package Windows bundle
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          set -euo pipefail
+          bash scripts/package_windows.sh
+
+          # 自检：把 package_windows.sh 的校验结论再确认一次
+          DST="dist/WebHTV-${{ steps.version.outputs.desktop_version }}-win-x64"
+          test -d "$DST" || { echo "::error::产物目录不存在: $DST"; exit 1; }
+          test -f "$DST/WebHTV.exe" || { echo "::error::缺少 WebHTV.exe"; exit 1; }
+          test -f "$DST/runtime/node.exe" || { echo "::error::缺少 runtime/node.exe"; exit 1; }
+          du -sh "$DST"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      # 打两种格式：zip（大众习惯）+ tar.gz（保留 Unix 可执行位）。
+      #
+      # ⚠️ 不用 PowerShell 的 `Compress-Archive` 打 zip：
+      #    它对**中文文件名**（包内有 `使用说明.txt`）按 ANSI 代码页写
+      #    条目名，Windows PowerShell 5.1 下必然乱码，pwsh 7 也不保证。
+      #    Python 的 zipfile 会显式写 UTF-8 标志位（general purpose bit 11），
+      #    在 Windows 资源管理器与各大解压工具里都能正确还原。
+      - name: Package Windows bundle
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.desktop_version }}"
+
+          export BUNDLE="dist/WebHTV-${VERSION}-win-x64"
+          test -d "$BUNDLE" || { echo "::error::产物目录不存在: $BUNDLE"; exit 1; }
+
+          python3 - <<'PY'
+          import os, pathlib, tarfile, zipfile
+
+          bundle = pathlib.Path(os.environ["BUNDLE"])
+          parent = bundle.parent
+          name = bundle.name
+
+          # ---- zip（UTF-8 文件名）----
+          zip_path = parent / f"{name}.zip"
+          with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+              for p in sorted(bundle.rglob("*")):
+                  arc = pathlib.Path(name) / p.relative_to(bundle)
+                  if p.is_dir():
+                      continue
+                  zf.write(p, arcname=str(arc).replace(os.sep, "/"))
+          print(f"zip 完成: {zip_path} ({zip_path.stat().st_size / 1048576:.1f} MB)")
+
+          # ---- tar.gz ----
+          tgz_path = parent / f"{name}.tar.gz"
+          with tarfile.open(tgz_path, "w:gz") as tf:
+              tf.add(bundle, arcname=name)
+          print(f"tar.gz 完成: {tgz_path} ({tgz_path.stat().st_size / 1048576:.1f} MB)")
+
+          # ---- 自检：zip 内的中文文件名必须能正确读出 ----
+          with zipfile.ZipFile(zip_path) as zf:
+              names = zf.namelist()
+              bad = zf.testzip()
+              if bad:
+                  raise SystemExit(f"zip 损坏，首个坏条目: {bad}")
+              if not any("使用说明" in n for n in names):
+                  raise SystemExit("zip 内未找到「使用说明.txt」—— 打包内容不完整")
+              print(f"zip 条目数: {len(names)}，中文文件名可正确读取")
+          PY
+
+          ls -lh dist/*.zip dist/*.tar.gz
+
+      - name: Upload Windows bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: platform-windows
+          path: |
+            ${{ env.APP_DIR }}/dist/*.tar.gz
+            ${{ env.APP_DIR }}/dist/*.zip
+          if-no-files-found: error
+          retention-days: 30

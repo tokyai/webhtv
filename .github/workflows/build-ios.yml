@@ -1,0 +1,195 @@
+name: Build iOS (reusable)
+
+# 可复用的 iOS 构建单元 —— 在 macOS runner 上出**未签名** .ipa。
+#
+# ## 为什么走 CI
+#
+# 构建 iOS 需要 macOS + Xcode，本仓库开发机是 Windows，本地无法完成。
+#
+# ## 为什么产出「未签名」包
+#
+# 签名证书与私钥属敏感材料，放进仓库或 CI secret 都会扩大暴露面。
+# 未签名 .ipa 有三种用途：
+#   1. 交给 Sideloadly / AltStore / TrollStore 等工具，用本地证书重签后安装；
+#   2. 交给 `scripts/sign_ios.sh`（需 macOS）用自签描述文件重签；
+#   3. 作为归档产物留存，需要时再签。
+#
+# ## 关键构建细节
+#
+#   * `--no-codesign`：跳过签名，否则 Xcode 会因为没有有效证书而失败。
+#   * `pod install` 必须在 `flutter pub get` **之后** —— 它需要
+#     `ios/Flutter/Generated.xcconfig`（由 pub get 生成）才能定位 FLUTTER_ROOT。
+#   * `flutter_node` 是**手工 vendor 的本地 pod**（不是 pub 插件），
+#     由 `ios/Podfile` 显式 `pod 'flutter_node', :path => 'flutter_node'` 挂载。
+#     它提供 NodeMobile.framework（arm64 真机专用，**无模拟器切片**）。
+#   * NodeMobile 只有真机切片 → 本 job 用真机 SDK 构建，不受影响；
+#     Podfile 里的 `EXCLUDED_ARCHS[sdk=iphonesimulator*]` 是为本机开发准备的。
+
+on:
+  workflow_call:
+    inputs:
+      release_tag:
+        description: "Release tag（用于产物命名）"
+        required: true
+        type: string
+    outputs:
+      desktop_version:
+        description: "版本号（取自 pubspec）"
+        value: ${{ jobs.build.outputs.desktop_version }}
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag（留空则用 pubspec 版本）"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  TZ: Asia/Shanghai
+  APP_DIR: platform/desktop
+
+jobs:
+  build:
+    name: Build unsigned IPA
+    runs-on: macos-14
+    timeout-minutes: 120
+
+    outputs:
+      desktop_version: ${{ steps.version.outputs.desktop_version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.41.6'
+          channel: stable
+          cache: true
+
+      - name: Show toolchain versions
+        run: |
+          flutter --version
+          xcodebuild -version
+          pod --version
+
+      - name: Resolve version
+        id: version
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          VERSION="$(grep -m1 '^version:' pubspec.yaml | sed 's/version: *//' | tr '+' '-')"
+          echo "desktop_version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "iOS 版本: $VERSION"
+
+      - name: Resolve dependencies
+        working-directory: ${{ env.APP_DIR }}
+        run: flutter pub get
+
+      # 前置检查：vendored pod 的文件必须齐全。
+      # 这些文件体积大（NodeMobile 54.9 MB），若被误加进 .gitignore
+      # 或在传输中丢失，失败会在很久之后的链接阶段才暴露，很难排查。
+      # 这里提前到最前面，几秒钟就能给出结论。
+      - name: Verify vendored flutter_node pod
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          set -euo pipefail
+          POD="ios/flutter_node"
+          for f in \
+            "$POD/flutter_node.podspec" \
+            "$POD/Classes/NodeWrapper.c" \
+            "$POD/Classes/FlutterNodePlugin.h" \
+            "$POD/Classes/FlutterNodePlugin.m" \
+            "$POD/Classes/SwiftFlutterNodePlugin.swift" \
+            "$POD/Frameworks/NodeMobile.framework/NodeMobile" \
+            "$POD/Frameworks/NodeMobile.framework/Info.plist" \
+          ; do
+            if [ -f "$f" ]; then
+              printf '    [OK]   %-62s %10s\n' "$f" "$(stat -f%z "$f")"
+            else
+              printf '    [缺失] %s\n' "$f"
+              echo "::error title=flutter_node 文件缺失::$f"
+              exit 1
+            fi
+          done
+
+          # NodeMobile 必须是 arm64 真机切片
+          ARCHS="$(lipo -archs "$POD/Frameworks/NodeMobile.framework/NodeMobile")"
+          echo "    NodeMobile 架构: $ARCHS"
+          case "$ARCHS" in
+            *arm64*) ;;
+            *) echo "::error::NodeMobile 不含 arm64 切片"; exit 1 ;;
+          esac
+
+      - name: Install CocoaPods
+        working-directory: ${{ env.APP_DIR }}/ios
+        run: |
+          set -euo pipefail
+          # Generated.xcconfig 必须已存在（上一步 pub get 生成）
+          test -f Flutter/Generated.xcconfig || {
+            echo "::error::缺少 Flutter/Generated.xcconfig，pub get 未生效"; exit 1;
+          }
+          pod install --repo-update
+
+          # 自检：Pod 里必须挂上了 flutter_node
+          grep -q "flutter_node" Podfile.lock || {
+            echo "::error::Podfile.lock 中没有 flutter_node"; exit 1;
+          }
+          echo "flutter_node 已挂载"
+
+      - name: Build (no codesign)
+        working-directory: ${{ env.APP_DIR }}
+        run: flutter build ios --release --no-codesign
+
+      - name: Package unsigned IPA
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          set -euo pipefail
+
+          APP_PATH="build/ios/iphoneos/Runner.app"
+          if [ ! -d "$APP_PATH" ]; then
+            echo "::error::未找到 $APP_PATH"
+            exit 1
+          fi
+
+          VERSION="${{ steps.version.outputs.desktop_version }}"
+
+          rm -rf build/ipa_raw
+          mkdir -p build/ipa_raw/Payload
+          cp -R "$APP_PATH" build/ipa_raw/Payload/
+
+          PLIST="build/ipa_raw/Payload/Runner.app/Info.plist"
+
+          # ---- 产物自检 ----
+          # 1) 打包内必须有 NodeMobile（否则源服务起不来）
+          if [ ! -d "build/ipa_raw/Payload/Runner.app/Frameworks/NodeMobile.framework" ]; then
+            echo "::error title=NodeMobile 缺失::Runner.app 内没有 NodeMobile.framework，源服务将无法启动"
+            ls -la build/ipa_raw/Payload/Runner.app/Frameworks/ || true
+            exit 1
+          fi
+          echo "    [OK] NodeMobile.framework 已打入"
+
+          # 2) Info.plist 关键项（缺了是警告，不阻断）
+          for key in NSAppTransportSecurity UISupportedInterfaceOrientations UIBackgroundModes; do
+            if /usr/libexec/PlistBuddy -c "Print :$key" "$PLIST" >/dev/null 2>&1; then
+              printf '    [OK] %s\n' "$key"
+            else
+              echo "::warning title=Info.plist 缺少 $key::$key 未设置，可能影响网络访问或后台播放"
+            fi
+          done
+
+          # 3) 可执行文件架构
+          echo "    Runner 架构: $(lipo -archs build/ipa_raw/Payload/Runner.app/Runner)"
+
+          (cd build/ipa_raw && zip -qry "../WebHTV-${VERSION}-ios-unsigned.ipa" Payload)
+          ls -lh "build/WebHTV-${VERSION}-ios-unsigned.ipa"
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: platform-ios
+          path: ${{ env.APP_DIR }}/build/WebHTV-*-ios-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 30

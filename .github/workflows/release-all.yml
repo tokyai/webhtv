@@ -1,0 +1,510 @@
+name: Release All Platforms
+
+# ============================================================================
+# 统一打包入口 —— **一次触发，打出全部平台**
+# ============================================================================
+#
+# 产出（1 个 GitHub Release，含全部平台产物）：
+#   Android : 手机端(arm64-v8a / armeabi-v7a) + TV 端(arm64-v8a / armeabi-v7a)
+#             共 4 个签名 APK，外加每个 APK 对应的更新清单 *.json
+#   Windows : WebHTV-<ver>-win-x64.zip / .tar.gz（便携包，含 runtime/node.exe）
+#   iOS     : WebHTV-<ver>-ios-unsigned.ipa（未签名，需自行重签）
+#
+# ## 怎么用
+#
+#   GitHub → Actions → "Release All Platforms" → Run workflow
+#   参数全部可留空（留空时用各平台自己的版本号 + 当前时间生成 tag）。
+#
+#   只想打某一个平台：直接跑对应的 "Build XXX (reusable)" workflow，
+#   它只构建不发布，产物在 Actions 的 Artifacts 里。
+#
+# ## 结构
+#
+#   prepare (ubuntu)          解析版本号与 tag，产出 meta
+#      ├── android (ubuntu)  ┐
+#      ├── windows (win)     ├─ 三个平台**并行**构建
+#      └── ios     (macos)   ┘
+#              ↓
+#   publish (ubuntu)         汇总全部产物 → 建 Release → OCI → CNB 同步
+#
+# 各构建单元只上传 artifact，**不各自建 Release** —— 否则会打出 3 个
+# 割裂的 Release，用户还得自己找齐。发布统一由 publish job 完成。
+#
+# ## 平台可选
+#
+# `platforms` 参数可只选部分平台（例如只想补打 iOS）。未选中的平台会被
+# 跳过，publish job 也只发布实际存在的产物。
+# ============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: "要构建的平台（all = 全部）"
+        required: false
+        default: all
+        type: choice
+        options:
+          - all
+          - android
+          - windows
+          - ios
+          - android,windows
+          - android,ios
+          - windows,ios
+      release_tag:
+        description: "Release tag，留空 = v<Android versionName>-yyyyMMddHHmm"
+        required: false
+        type: string
+      release_channel:
+        description: "发布通道，auto 在 fongmi-sync 分支上用 beta"
+        required: false
+        default: auto
+        type: choice
+        options:
+          - auto
+          - stable
+          - beta
+      release_notes:
+        description: "Release notes，换行写 \\n"
+        required: false
+        type: string
+      prerelease:
+        description: "标记为 pre-release"
+        required: false
+        default: false
+        type: boolean
+      sync_cnb:
+        description: "同步产物到 CNB Release"
+        required: false
+        default: false
+        type: boolean
+      publish_oci:
+        description: "把 APK 发布为 OCI 制品（需配置 Registry 变量与密钥）"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+env:
+  TZ: Asia/Shanghai
+  CNB_API_ENDPOINT: https://api.cnb.cool
+  CNB_WEB_ENDPOINT: https://cnb.cool
+  CNB_REPO_SLUG: fish2035/webhtv-release
+  CNB_REPO_URL: https://cnb.cool/fish2035/webhtv-release.git
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. 解析元信息：版本号、tag、通道、以及「本次要构建哪些平台」
+  # ---------------------------------------------------------------------------
+  prepare:
+    name: Resolve release metadata
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      title: ${{ steps.meta.outputs.title }}
+      version_name: ${{ steps.meta.outputs.version_name }}
+      version_code: ${{ steps.meta.outputs.version_code }}
+      short_sha: ${{ steps.meta.outputs.short_sha }}
+      channel: ${{ steps.meta.outputs.channel }}
+      apk_suffix: ${{ steps.meta.outputs.apk_suffix }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
+      build_android: ${{ steps.platforms.outputs.android }}
+      build_windows: ${{ steps.platforms.outputs.windows }}
+      build_ios: ${{ steps.platforms.outputs.ios }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # tag 由 **Android 版本号**派生 —— 沿用既有约定，让 tag 继续与
+      # Android 版本对齐（历史 release 都是这么命名的）。
+      # 桌面端/iOS 的版本号只用于产物文件名，不进 tag。
+      - name: Resolve tag and channel
+        id: meta
+        env:
+          IN_TAG: ${{ inputs.release_tag }}
+          IN_CHANNEL: ${{ inputs.release_channel }}
+          IN_PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          set -euo pipefail
+
+          VERSION_NAME="$(sed -n 's/^[[:space:]]*versionName[[:space:]]*"\([^"]*\)".*/\1/p' app/build.gradle | head -1)"
+          VERSION_CODE="$(sed -n 's/^[[:space:]]*versionCode[[:space:]]*\([0-9][0-9]*\).*/\1/p' app/build.gradle | head -1)"
+
+          CHANNEL="$IN_CHANNEL"
+          if [ -z "$CHANNEL" ] || [ "$CHANNEL" = "auto" ]; then
+            if [ "${{ github.ref_name }}" = "fongmi-sync" ]; then
+              CHANNEL="beta"
+            else
+              CHANNEL="stable"
+            fi
+          fi
+
+          if [ "$CHANNEL" = "beta" ]; then
+            APK_SUFFIX="-beta"
+            TAG_PATTERN="^v${VERSION_NAME}-beta-[0-9]{12}$"
+            TAG_DEFAULT="v${VERSION_NAME}-beta-$(date +%Y%m%d%H%M)"
+            TAG_EXPECT="v${VERSION_NAME}-beta-yyyyMMddHHmm"
+          else
+            APK_SUFFIX=""
+            TAG_PATTERN="^v${VERSION_NAME}-[0-9]{12}$"
+            TAG_DEFAULT="v${VERSION_NAME}-$(date +%Y%m%d%H%M)"
+            TAG_EXPECT="v${VERSION_NAME}-yyyyMMddHHmm"
+          fi
+
+          TAG="$IN_TAG"
+          if [ -z "$TAG" ]; then
+            TAG="$TAG_DEFAULT"
+          fi
+          if ! printf '%s' "$TAG" | grep -Eq "$TAG_PATTERN"; then
+            echo "::error title=Invalid release tag::Expected $TAG_EXPECT, got: $TAG"
+            exit 1
+          fi
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "::error title=Release tag exists::$TAG already exists"
+            exit 1
+          fi
+
+          PRERELEASE="$IN_PRERELEASE"
+          if [ "$PRERELEASE" != "true" ] && [ "$CHANNEL" = "beta" ]; then
+            PRERELEASE="true"
+          fi
+
+          {
+            echo "tag=$TAG"
+            echo "title=${TAG#v}"
+            echo "version_name=$VERSION_NAME"
+            echo "version_code=$VERSION_CODE"
+            echo "short_sha=$(git rev-parse --short=7 HEAD)"
+            echo "channel=$CHANNEL"
+            echo "apk_suffix=$APK_SUFFIX"
+            echo "prerelease=$PRERELEASE"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "tag=$TAG"
+          echo "channel=$CHANNEL"
+          echo "prerelease=$PRERELEASE"
+
+      - name: Resolve target platforms
+        id: platforms
+        env:
+          IN_PLATFORMS: ${{ inputs.platforms }}
+        run: |
+          set -euo pipefail
+          SEL="${IN_PLATFORMS:-all}"
+          echo "选择: $SEL"
+
+          check() {
+            case ",$SEL," in
+              *,all,*) echo "true" ;;
+              *,$1,*)  echo "true" ;;
+              *)       echo "false" ;;
+            esac
+          }
+
+          A="$(check android)"
+          W="$(check windows)"
+          I="$(check ios)"
+
+          {
+            echo "android=$A"
+            echo "windows=$W"
+            echo "ios=$I"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "android=$A windows=$W ios=$I"
+
+          if [ "$A" = "false" ] && [ "$W" = "false" ] && [ "$I" = "false" ]; then
+            echo "::error title=未选择任何平台::platforms=$SEL"
+            exit 1
+          fi
+
+  # ---------------------------------------------------------------------------
+  # 2. 三平台并行构建（各自只上传 artifact，不发布）
+  # ---------------------------------------------------------------------------
+  android:
+    name: Android
+    needs: prepare
+    if: ${{ needs.prepare.outputs.build_android == 'true' }}
+    uses: ./.github/workflows/build-android.yml
+    with:
+      release_tag: ${{ needs.prepare.outputs.tag }}
+      apk_suffix: ${{ needs.prepare.outputs.apk_suffix }}
+      channel: ${{ needs.prepare.outputs.channel }}
+      release_notes: ${{ inputs.release_notes }}
+    secrets: inherit
+
+  windows:
+    name: Windows
+    needs: prepare
+    if: ${{ needs.prepare.outputs.build_windows == 'true' }}
+    uses: ./.github/workflows/build-windows.yml
+    with:
+      release_tag: ${{ needs.prepare.outputs.tag }}
+    secrets: inherit
+
+  ios:
+    name: iOS
+    needs: prepare
+    if: ${{ needs.prepare.outputs.build_ios == 'true' }}
+    uses: ./.github/workflows/build-ios.yml
+    with:
+      release_tag: ${{ needs.prepare.outputs.tag }}
+    secrets: inherit
+
+  # ---------------------------------------------------------------------------
+  # 3. 汇总发布：下载全部 artifact → 一个 Release → OCI → CNB
+  # ---------------------------------------------------------------------------
+  publish:
+    name: Publish unified release
+    needs: [prepare, android, windows, ios]
+    # 即便某个平台被跳过（skipped）或失败，只要还有产物就继续发布。
+    # 用 always() 才有机会在部分成功时交付 —— 否则一个平台挂掉会导致
+    # 其它平台已构建好的产物被白白丢弃。
+    if: always() && needs.prepare.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Download all platform artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/raw
+
+      - name: Flatten artifacts
+        run: |
+          set -euo pipefail
+          rm -rf dist && mkdir -p dist
+          if [ ! -d dist/raw ]; then echo "没有任何 artifact"; exit 1; fi
+          # download-artifact 会按 artifact 名建子目录，这里压平
+          find dist/raw -type f -exec cp -v {} dist/ \;
+          rm -rf dist/raw
+          echo "--- 汇总产物 ---"
+          ls -lh dist/
+
+      - name: Report skipped platforms
+        env:
+          ANDROID_RESULT: ${{ needs.android.result }}
+          WINDOWS_RESULT: ${{ needs.windows.result }}
+          IOS_RESULT: ${{ needs.ios.result }}
+        run: |
+          for p in android windows ios; do
+            case "$p" in
+              android) R="$ANDROID_RESULT" ;;
+              windows) R="$WINDOWS_RESULT" ;;
+              ios)     R="$IOS_RESULT" ;;
+            esac
+            case "$R" in
+              success) ;;
+              skipped) echo "::notice title=$p 已跳过::本次未选择该平台" ;;
+              *)       echo "::warning title=$p 构建未成功::result=$R —— 本次发布不含该平台产物" ;;
+            esac
+          done
+
+      - name: Guard against empty release
+        run: |
+          set -euo pipefail
+          COUNT="$(find dist -maxdepth 1 -type f | wc -l | tr -d ' ')"
+          echo "产物文件数: $COUNT"
+
+          # 至少要有一份可交付产物，否则不该建 Release
+          DELIVERABLE="$(find dist -maxdepth 1 -type f \
+            \( -name '*.apk' -o -name '*.ipa' -o -name '*.zip' -o -name '*.tar.gz' \) \
+            | wc -l | tr -d ' ')"
+          if [ "$DELIVERABLE" -eq 0 ]; then
+            echo "::error title=无可用产物::所有平台都未产出可交付文件，已中止发布"
+            exit 1
+          fi
+
+          # Android 若参与构建，更新清单必须是齐的
+          APKS="$(find dist -maxdepth 1 -name '*.apk' | wc -l | tr -d ' ')"
+          MANIFESTS="$(find dist -maxdepth 1 -name '*.json' | wc -l | tr -d ' ')"
+          echo "APK=$APKS 清单=$MANIFESTS"
+          if [ "$APKS" -gt 0 ] && [ "$APKS" -ne "$MANIFESTS" ]; then
+            echo "::error title=更新清单不齐::APK 有 $APKS 个，清单只有 $MANIFESTS 个"
+            exit 1
+          fi
+
+      - name: Set up ORAS
+        id: oras
+        if: ${{ inputs.publish_oci && needs.android.result == 'success' }}
+        continue-on-error: true
+        uses: oras-project/setup-oras@v1
+        with:
+          url: https://github.com/oras-project/oras/releases/download/v1.3.4/oras_1.3.4_linux_amd64.tar.gz
+          checksum: f27adb935022d94df8dc77719c322dda592c78a0d57a6f7dcdd8d900b248c454
+
+      - name: Publish APKs to OCI Registry
+        id: oci
+        if: ${{ inputs.publish_oci && needs.android.result == 'success' && steps.oras.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          DIST_DIR: dist
+          OCI_METADATA_FILE: build/oci-metadata.json
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          OCI_REPOSITORY: ${{ vars.OCI_REPOSITORY }}
+          OCI_USERNAME: ${{ secrets.OCI_USERNAME }}
+          OCI_TOKEN: ${{ secrets.OCI_TOKEN }}
+        run: bash .github/scripts/publish-oci-apks.sh
+
+      - name: Report OCI publish failure
+        if: ${{ inputs.publish_oci && needs.android.result == 'success' && (steps.oras.outcome == 'failure' || steps.oci.outcome == 'failure') }}
+        run: echo "::warning title=OCI publish unavailable::GitHub release will continue without OCI metadata."
+
+      # OCI 成功后，把 oci 描述符回填进更新清单（供客户端做 OCI 拉取）
+      - name: Merge OCI descriptors into manifests
+        if: ${{ steps.oci.outcome == 'success' }}
+        run: |
+          python3 - <<'PY'
+          import glob, json, os
+          meta = "build/oci-metadata.json"
+          if not os.path.isfile(meta):
+              raise SystemExit(0)
+          oci = json.load(open(meta, encoding="utf-8"))
+          for jf in glob.glob("dist/*.json"):
+              base = os.path.splitext(os.path.basename(jf))[0]
+              if base not in oci:
+                  continue
+              data = json.load(open(jf, encoding="utf-8"))
+              apk = os.path.join("dist", base + ".apk")
+              if not os.path.isfile(apk):
+                  continue
+              size = os.path.getsize(apk)
+              d = oci[base]
+              if d.get("size") != size:
+                  raise SystemExit(f"OCI descriptor size mismatch for {base}")
+              data.setdefault("downloads", {})["oci"] = d
+              with open(jf, "w", encoding="utf-8") as fh:
+                  json.dump(data, fh, ensure_ascii=False, indent=2)
+                  fh.write("\n")
+              print(f"已回填 OCI 描述符: {base}")
+          PY
+
+      - name: Prepare release notes
+        id: release_notes
+        env:
+          RELEASE_NOTES_RAW: ${{ inputs.release_notes }}
+        run: |
+          python3 - <<'PY'
+          import os
+          raw = os.environ.get("RELEASE_NOTES_RAW", "").strip()
+          notes = (
+              raw
+              .replace("\\r\\n", "\n")
+              .replace("\\n", "\n")
+              .replace("\\t", "\t")
+              .replace('\\"', '"')
+              .replace("\\'", "'")
+          )
+          if not notes:
+              notes = (
+                  "手动触发统一构建发布。\n\n"
+                  "**本页产物**\n\n"
+                  "- Android 手机端 / TV 端 APK（arm64-v8a、armeabi-v7a）\n"
+                  "- Windows 便携包（zip / tar.gz，含 Node 运行时）\n"
+                  "- iOS 未签名 IPA（需自行用 Sideloadly 或自签证书重签后安装）\n"
+              )
+          delimiter = "RELEASE_NOTES_EOF"
+          while delimiter in notes:
+              delimiter += "_"
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write(f"notes<<{delimiter}\n")
+              fh.write(notes)
+              if not notes.endswith("\n"):
+                  fh.write("\n")
+              fh.write(f"{delimiter}\n")
+          PY
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_NOTES: ${{ steps.release_notes.outputs.notes }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          TITLE: ${{ needs.prepare.outputs.title }}
+          PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          PRERELEASE_FLAG=""
+          if [ "$PRERELEASE" = "true" ]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+
+          # 逐类收集，避免把中间文件误传上去
+          FILES=()
+          while IFS= read -r f; do [ -n "$f" ] && FILES+=("$f"); done < <(
+            find dist -maxdepth 1 -type f \
+              \( -name '*.apk' -o -name '*.json' -o -name '*.ipa' \
+                 -o -name '*.zip' -o -name '*.tar.gz' \) | sort
+          )
+
+          if [ "${#FILES[@]}" -eq 0 ]; then
+            echo "::error::没有可上传的文件"
+            exit 1
+          fi
+          printf '将上传 %d 个文件:\n' "${#FILES[@]}"
+          printf '  %s\n' "${FILES[@]}"
+
+          gh release create "$TAG" \
+            --target "$GITHUB_SHA" \
+            --title "$TITLE" \
+            --notes "$RELEASE_NOTES" \
+            $PRERELEASE_FLAG \
+            "${FILES[@]}"
+
+          echo "Release 已创建: $TAG"
+
+      - name: Sync to CNB
+        if: ${{ inputs.sync_cnb }}
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          CNB_RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          CNB_RELEASE_TITLE: ${{ needs.prepare.outputs.title }}
+          CNB_RELEASE_NOTES: ${{ steps.release_notes.outputs.notes }}
+          CNB_RELEASE_PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+          CNB_RELEASE_LATEST: ${{ needs.prepare.outputs.channel == 'stable' }}
+        run: |
+          .github/scripts/sync-cnb-release.sh
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: webhtv-${{ needs.prepare.outputs.tag }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Summary
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+          ANDROID_RESULT: ${{ needs.android.result }}
+          WINDOWS_RESULT: ${{ needs.windows.result }}
+          IOS_RESULT: ${{ needs.ios.result }}
+        run: |
+          {
+            echo "## 发布完成：$TAG"
+            echo ""
+            echo "| 平台 | 构建结果 |"
+            echo "|---|---|"
+            echo "| Android | $ANDROID_RESULT |"
+            echo "| Windows | $WINDOWS_RESULT |"
+            echo "| iOS | $IOS_RESULT |"
+            echo ""
+            echo "### 产物"
+            echo '```'
+            ls -lh dist/ | tail -n +2
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
