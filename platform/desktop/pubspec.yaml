@@ -1,5 +1,5 @@
 name: webhtv_win
-description: "WebHTV 桌面端（Windows）— 通过添加源地址引入播放源，不自带任何内置源。界面按 PeekPili 复刻。"
+description: "WebHTV 独立客户端（Windows / iOS）— 通过添加源地址引入播放源，不自带任何内置源。界面按 PeekPili 复刻。"
 publish_to: 'none'
 
 version: 0.1.0+1
@@ -34,9 +34,18 @@ dependencies:
   path_provider: ^2.1.5
   path: ^1.9.0
 
-  # 播放器（Windows 走 libmpv / media_kit）
+  # iOS 进程内 Node（nodejs-mobile）的 FFI 绑定需要：
+  # calloc / malloc 分配 C 字符串数组，Utf8 做 Dart↔C 字符串转换。
+  # 桌面端不用（走 Process.start 子进程），但依赖是跨平台声明。
+  ffi: ^2.1.3
+
+  # 播放器（Windows 走 libmpv / media_kit；iOS 走 AVPlayer）
   media_kit: ^1.1.11
   media_kit_video: ^1.2.5
+  # 平台原生库的伞形包 —— `*_libs_video` 会自动按目标平台拉对应的实现：
+  #   Windows → media_kit_libs_windows_video
+  #   iOS     → media_kit_libs_ios_video
+  # 因此这里保持 `_libs_video` 不动，不要手工换成 iOS 专用包。
   media_kit_libs_video: ^1.0.5
 
   # 播放期间保持屏幕常亮（PeekPili 播放页用）

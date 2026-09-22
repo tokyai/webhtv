@@ -27,7 +27,11 @@
   4. **两套源体系完全独立**（E11）：Android 用 `csp_*` DEX（96 站点），桌面/iOS 用 `nodejs_*`（94 站点）。**Android 侧一行都不用改**；两端不共享源处理代码。
   5. 源程序运行时自动生成 94 站点的配置（`nodejs_*`），客户端只需读取，**天然满足"不内置源"**。
   6. **交付面已确定**：Windows 单一桌面产物（Q4）+ iOS 自签 `.ipa`（Q5）。Q4/Q5 均已闭环，无剩余范围疑问。
-- **唯一下一动作**：等待用户批准进入 `X1-2`（Windows 桌面端 MVP）实施。
+- **进度更新（2026-09-22 晚）**：`X1-2`（Windows 桌面端）**已完成并交付**；
+  `X1-3`（iOS）**已完成代码与工程骨架**。iOS 实施细节见
+  [`X1-ios-build-and-sign.md`](./X1-ios-build-and-sign.md)。
+- **唯一下一动作**：在 GitHub Actions 上跑一次 `iOS Release` workflow，
+  验证 macOS runner 能产出未签名 `.ipa`（本机是 Windows，无法验证）。
 
 ---
 

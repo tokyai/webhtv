@@ -1,0 +1,134 @@
+name: iOS Release
+
+# 在 macOS runner 上构建 **未签名** iOS 应用并打成 .ipa。
+#
+# ## 为什么走 CI 而不是本地
+#
+# 构建 iOS 需要 macOS + Xcode，Windows 上无法完成。本仓库的开发机是
+# Windows，因此把构建搬到 GitHub Actions 的 macOS runner。
+#
+# ## 为什么产出「未签名」包
+#
+# 未签名 .ipa **不能在未越狱设备上直接安装**，它有三种用途：
+#   1. 交给 Sideloadly / AltStore / TrollStore 等工具，用本地证书重签后安装；
+#   2. 交给 `codesign` + 自签描述文件（本项目已有开发证书与 profile）重签；
+#   3. 作为归档产物留存，需要时再签。
+#
+# 之所以不在 CI 里签：签名证书与私钥属于敏感材料，放进仓库或 CI secret
+# 都会扩大暴露面；而自签场景下签名只需要在用户机器上做一次。
+#
+# ## 关键构建细节
+#
+#   * `--no-codesign`：跳过签名，否则 Xcode 会因为没有有效证书而失败。
+#   * `EXCLUDED_ARCHS`：NodeMobile.framework **只有 arm64 真机切片**，
+#     模拟器（x86_64 / arm64-simulator）构不出来。CI 用真机 SDK 构建，
+#     因此不受影响；但如果有人在本机跑模拟器，必须保留 Podfile 里的排除项。
+#   * 组装 Payload：`.ipa` 就是一个 zip，里面是 `Payload/<AppName>.app`。
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_name:
+        description: "覆盖版本名（默认取 platform/desktop/pubspec.yaml 的 version）"
+        required: false
+        type: string
+      upload_artifact:
+        description: "上传 .ipa 为构建产物"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+env:
+  TZ: Asia/Shanghai
+  # 本工程 Flutter 代码位于 platform/desktop/，与本 workflow 同级仓库
+  APP_DIR: platform/desktop
+
+jobs:
+  build-ios:
+    name: Build unsigned IPA
+    runs-on: macos-14
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.41.6'
+          channel: stable
+          cache: true
+
+      - name: Show toolchain versions
+        run: |
+          flutter --version
+          xcodebuild -version
+          pod --version || true
+
+      - name: Resolve dependencies
+        working-directory: ${{ env.APP_DIR }}
+        run: flutter pub get
+
+      - name: Install CocoaPods
+        working-directory: ${{ env.APP_DIR }}/ios
+        run: |
+          # 第一次 pod install 需要 Flutter 生成 Generated.xcconfig，
+          # 因此在 pub get 之后执行。
+          pod install --repo-update
+
+      - name: Build (no codesign)
+        working-directory: ${{ env.APP_DIR }}
+        run: flutter build ios --release --no-codesign
+
+      - name: Package unsigned IPA
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          set -euo pipefail
+
+          APP_PATH="build/ios/iphoneos/Runner.app"
+          if [ ! -d "$APP_PATH" ]; then
+            echo "错误：未找到 $APP_PATH" >&2
+            exit 1
+          fi
+
+          # 版本号：优先用 workflow 输入，否则从 pubspec 读
+          if [ -n "${{ inputs.build_name }}" ]; then
+            VERSION="${{ inputs.build_name }}"
+          else
+            VERSION="$(grep -m1 '^version:' pubspec.yaml | sed 's/version: *//' | tr '+' '-')"
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+          rm -rf build/ipa_raw build/Payload
+          mkdir -p build/ipa_raw/Payload
+          cp -R "$APP_PATH" build/ipa_raw/Payload/
+
+          # Info.plist 自检：确保关键项都在（ATS 放开、竖屏、后台音频）
+          PLIST="build/ipa_raw/Payload/Runner.app/Info.plist"
+          for key in NSAppTransportSecurity UISupportedInterfaceOrientations UIBackgroundModes; do
+            if ! /usr/libexec/PlistBuddy -c "Print :$key" "$PLIST" >/dev/null 2>&1; then
+              echo "警告：Info.plist 缺少 $key" >&2
+            fi
+          done
+
+          # Payload 结构确认（nodejs-mobile 的 NodeMobile 必须已在 Frameworks 内）
+          if [ ! -d "build/ipa_raw/Payload/Runner.app/Frameworks/NodeMobile.framework" ]; then
+            echo "错误：Runner.app 内没有 NodeMobile.framework —— 源服务将无法启动" >&2
+            exit 1
+          fi
+
+          (cd build/ipa_raw && zip -qry "../WebHTV-${VERSION}-ios-unsigned.ipa" Payload)
+          ls -lh "build/WebHTV-${VERSION}-ios-unsigned.ipa"
+
+      - name: Upload IPA
+        if: ${{ inputs.upload_artifact }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: WebHTV-${{ env.VERSION }}-ios-unsigned
+          path: ${{ env.APP_DIR }}/build/WebHTV-*-ios-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 30

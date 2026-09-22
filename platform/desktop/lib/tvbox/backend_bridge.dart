@@ -258,7 +258,12 @@ class SourceService {
     }
   }
 
-  /// 起 Node 子进程并读取站点清单。返回 null 表示成功。
+  /// 启动源服务并读取站点清单。返回 null 表示成功。
+  ///
+  /// 两种承载形态：
+  ///   - **桌面端**：起独立 node.exe 子进程，需要先定位可执行文件并做端口预检
+  ///   - **iOS**：进程内 Node（nodejs-mobile），无需可执行文件、无需端口预检
+  ///     （Node 单例，同进程内不可能出现「别的程序占着 9988」）
   Future<String?> start(SourceConfig cfg) async {
     final entry = entryPathOf(cfg.id);
     if (!File(entry).existsSync()) {
@@ -266,16 +271,47 @@ class SourceService {
       if (err != null) return err;
     }
 
-    final nodeExe = await _resolveNodeExecutable();
-    if (nodeExe == null) {
-      return '未找到 node.exe。请把 node.exe 放到应用目录下的 runtime/ 文件夹，'
-          '或确保系统 PATH 中存在 node。';
+    String? nodeExe;
+    if (!Platform.isIOS) {
+      nodeExe = await _resolveNodeExecutable();
+      if (nodeExe == null) {
+        return '未找到 node.exe。请把 node.exe 放到应用目录下的 runtime/ 文件夹，'
+            '或确保系统 PATH 中存在 node。';
+      }
     }
 
     await _runtime?.stop();
     _runtime = null;
     _client?.dispose();
     _client = null;
+
+    // ---- iOS：进程内 Node，单例，直接起 ----
+    if (Platform.isIOS) {
+      final runtime = SourceRuntime(
+        sourceId: cfg.id,
+        workDir: p.join(_runtimeRoot.path, cfg.id),
+        entryFile: entry,
+        port: 9988,
+      );
+      try {
+        await runtime.start();
+      } on SourceRuntimeException catch (e) {
+        return e.message;
+      }
+      _runtime = runtime;
+      activeBase = runtime.baseUrl;
+      _client = SourceClient(runtime.baseUrl);
+
+      try {
+        final entries = await _client!.sites();
+        _sites = [for (final e in entries) siteFromEntry(e)];
+      } catch (e) {
+        return '读取站点清单失败：${_toSpiderError(e).message}';
+      }
+      if (_sites.isEmpty) return '源未返回任何可用站点';
+      _lastError = null;
+      return null;
+    }
 
     // 端口 9988 预检 —— 关键：**区分「同类服务可复用」和「异类占用」**
     //

@@ -6,17 +6,22 @@ import 'package:provider/provider.dart';
 import '../core/storage.dart';
 import '../core/theme.dart';
 import '../state/app_state.dart';
+import '../widgets/bottom_nav_bar.dart';
 import '../widgets/nav_rail.dart';
 import 'favorite_page.dart';
 import 'history_page.dart';
 import 'home/home_page.dart';
 import 'setting/settings_page.dart';
 
-/// 主框架：左侧竖向导航栏 + 右侧内容区。
+/// 主框架：自适应的导航 + 内容区。
+///
+/// 导航形态按可用宽度自动切换（见 [AdaptiveNav]）：
+///   - **宽屏**（≥600dp，桌面窗口 / iPad / 手机横屏）→ 左侧竖向 [NavRail]
+///   - **窄屏**（<600dp，手机竖屏）→ 底部 [BottomNavBar]
 ///
 /// 导航项与 WebHTV 安卓版的底部导航语义一致（点播 / 直播 / 设置），
-/// 桌面端按平台特点把「历史」「收藏」也放进左栏 —— 桌面屏幕宽，
-/// 这两个高频入口没必要藏在顶栏图标里。
+/// 本工程按平台特点把「收藏」「历史」也放进导航 —— 这两个高频入口在
+/// 安卓端藏在顶栏图标里，独立客户端没必要再藏。
 class MainShell extends StatefulWidget {
   const MainShell({super.key});
 
@@ -123,16 +128,17 @@ class _MainShellState extends State<MainShell> {
     final index = _index.clamp(0, items.isEmpty ? 0 : items.length - 1);
     return Scaffold(
       backgroundColor: PeekColors.surface,
-      body: Row(
-        children: [
-          NavRail(items: items, index: index, onChanged: (i) => _go(i, items)),
-          Expanded(
-            child: IndexedStack(
-              index: index,
-              children: [for (final it in items) _pageFor(it.id)],
-            ),
-          ),
-        ],
+      // 自适应导航：宽屏出侧栏、窄屏出底栏（见 AdaptiveNav 的断点说明）。
+      // 两种形态共用同一个 IndexedStack，切形态时**不会重建页面**
+      // （IndexedStack 的 children 是同一个列表），滚动位置与播放状态都保留。
+      body: AdaptiveNav(
+        items: items,
+        index: index,
+        onChanged: (i) => _go(i, items),
+        builder: (context, showRail) => IndexedStack(
+          index: index,
+          children: [for (final it in items) _pageFor(it.id)],
+        ),
       ),
     );
   }

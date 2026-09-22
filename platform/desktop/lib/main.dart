@@ -29,13 +29,15 @@ Future<void> main() async {
 
   // 退出前回收 Node 子进程。
   //
-  // 为什么需要：源服务是**独立进程**，监听固定的 9988 端口。若不显式回收，
-  // 关闭窗口后它会变成孤儿并永久占住端口 —— 下次启动就会报「端口被占用」。
+  // 为什么需要：桌面端的源服务是**独立进程**，监听固定的 9988 端口。若不显式
+  // 回收，关闭窗口后它会变成孤儿并永久占住端口 —— 下次启动就会报「端口被占用」。
   //
   // 这里挂 `AppLifecycleListener.onExitRequested`（桌面端关窗时触发），
   // 给一点时间让 stop() 走完；同时把返回码交给框架决定是否真的退出。
   // 另外配合 Node 侧的心跳看护（见 `backend/source_runtime.dart`）双保险：
   // 即使本回调因崩溃/强杀没跑到，子进程也会在约 15 秒内自杀。
+  //
+  // iOS 上这段是空转：Node 在同进程内，宿主退出即随之消失，无孤儿问题。
   final lifecycle = AppLifecycleListener(
     onExitRequested: () async {
       try {
@@ -66,7 +68,17 @@ Future<void> main() async {
     ));
   };
 
-  if (!Platform.isWindows && !Platform.isLinux && !Platform.isMacOS) {
+  // ---- 屏幕方向策略 ----
+  //
+  // **iOS：不锁方向**。用户要求「竖屏结构 + 元素符合竖屏配置」，但播放器
+  // 需要能转横屏全屏观看。因此这里**不调用** setPreferredOrientations，
+  // 让系统跟随设备；界面层用 `LayoutBuilder` 做竖/横自适应（见 main_shell）。
+  //
+  // 桌面端：窗口可自由缩放，同样不锁。
+  //
+  // （历史上这里对非桌面平台强制横屏，是为 Android 电视端准备的；
+  //   本工程只有 Windows + iOS 两个目标，该分支已无适用对象。）
+  if (Platform.isAndroid) {
     await SystemChrome.setPreferredOrientations([
       DeviceOrientation.landscapeLeft,
       DeviceOrientation.landscapeRight,

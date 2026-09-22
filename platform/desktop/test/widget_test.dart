@@ -9,7 +9,9 @@ import 'package:webhtv_win/tvbox/backend_bridge.dart';
 import 'package:webhtv_win/tvbox/models.dart';
 import 'package:webhtv_win/tvbox/playlist_merge.dart';
 import 'package:webhtv_win/tvbox/spider.dart';
+import 'package:webhtv_win/widgets/bottom_nav_bar.dart';
 import 'package:webhtv_win/widgets/common.dart';
+import 'package:webhtv_win/widgets/nav_rail.dart';
 
 /// 本工程的测试只覆盖**纯逻辑**与**无 IO 的渲染**。
 ///
@@ -514,6 +516,142 @@ void main() {
         ),
       );
       expect(find.text('设置'), findsOneWidget);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // 自适应导航（iOS 竖屏 vs 桌面/横屏）
+  //
+  // 这是 iOS 支持的核心行为：**同一份代码**在窄屏出底栏、宽屏出侧栏。
+  // 断点 600dp 落在「iPhone 竖屏最宽 430dp」与「iPad 竖屏最窄 744dp」之间。
+  // ---------------------------------------------------------------------------
+  group('自适应导航', () {
+    const items = kNavItems;
+
+    Widget harness({required double width}) {
+      return MaterialApp(
+        home: Scaffold(
+          backgroundColor: PeekColors.surface,
+          body: SizedBox(
+            width: width,
+            height: 800,
+            child: AdaptiveNav(
+              items: items,
+              index: 0,
+              onChanged: (_) {},
+              builder: (context, showRail) => Text(showRail ? 'RAIL' : 'BOTTOM'),
+            ),
+          ),
+        ),
+      );
+    }
+
+    testWidgets('窄屏（iPhone 竖屏 390dp）→ 出底部标签栏，不出侧栏', (tester) async {
+      await tester.pumpWidget(harness(width: 390));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(BottomNavBar), findsOneWidget);
+      expect(find.byType(NavRail), findsNothing);
+      // builder 收到的 showRail 必须是 false，内容区不能为侧栏让位
+      expect(find.text('BOTTOM'), findsOneWidget);
+      expect(find.text('RAIL'), findsNothing);
+    });
+
+    testWidgets('宽屏（桌面窗口 1280dp）→ 出侧栏，不出底栏', (tester) async {
+      await tester.pumpWidget(harness(width: 1280));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(NavRail), findsOneWidget);
+      expect(find.byType(BottomNavBar), findsNothing);
+      expect(find.text('RAIL'), findsOneWidget);
+      expect(find.text('BOTTOM'), findsNothing);
+    });
+
+    testWidgets('断点边界：599dp 走底栏，600dp 走侧栏', (tester) async {
+      await tester.pumpWidget(harness(width: 599));
+      await tester.pumpAndSettle();
+      expect(find.byType(BottomNavBar), findsOneWidget,
+          reason: '599dp 应小于断点，用底栏');
+
+      await tester.pumpWidget(harness(width: 600));
+      await tester.pumpAndSettle();
+      expect(find.byType(NavRail), findsOneWidget,
+          reason: '600dp 应达到断点，用侧栏');
+    });
+
+    testWidgets('两种形态都渲染全部导航条目', (tester) async {
+      for (final w in <double>[390, 1280]) {
+        await tester.pumpWidget(harness(width: w));
+        await tester.pumpAndSettle();
+        for (final it in items) {
+          expect(find.text(it.label), findsOneWidget,
+              reason: '宽度 ${w}dp 下应显示条目「${it.label}」');
+        }
+      }
+    });
+
+    testWidgets('点击底栏条目回调正确的下标', (tester) async {
+      int? tapped;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            backgroundColor: PeekColors.surface,
+            body: SizedBox(
+              width: 390,
+              height: 800,
+              child: AdaptiveNav(
+                items: items,
+                index: 0,
+                onChanged: (i) => tapped = i,
+                builder: (_, __) => const SizedBox.shrink(),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // 第二个条目（收藏）
+      await tester.tap(find.text(items[1].label));
+      await tester.pump();
+      expect(tapped, 1);
+    });
+
+    testWidgets('底栏为 Home Indicator 留出底部安全区', (tester) async {
+      await tester.pumpWidget(
+        MediaQuery(
+          // iPhone 竖屏典型底部 inset
+          data: const MediaQueryData(
+            size: Size(390, 844),
+            padding: EdgeInsets.only(bottom: 34),
+          ),
+          child: MaterialApp(
+            home: Scaffold(
+              backgroundColor: PeekColors.surface,
+              body: SizedBox(
+                width: 390,
+                height: 800,
+                child: AdaptiveNav(
+                  items: items,
+                  index: 0,
+                  onChanged: (_) {},
+                  builder: (_, __) => const SizedBox.shrink(),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(BottomNavBar), findsOneWidget);
+      // 存在 SafeArea 包住内容即认为已处理（widget 树断言，不测像素）
+      expect(
+        find.descendant(
+          of: find.byType(BottomNavBar),
+          matching: find.byType(SafeArea),
+        ),
+        findsOneWidget,
+      );
     });
   });
 }
