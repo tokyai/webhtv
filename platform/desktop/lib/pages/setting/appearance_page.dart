@@ -282,7 +282,8 @@ class _AppearancePageState extends State<AppearancePage> {
                   Padding(
                     padding: const EdgeInsets.fromLTRB(18, 2, 18, 14),
                     child: Text(
-                      '横屏模式下将显示侧边导航栏，竖屏模式下将显示底部导航栏',
+                      '横屏模式下将显示侧边导航栏，竖屏模式下将显示底部导航栏；'
+                      '样式对两种形态同时生效',
                       style: TextStyle(
                           fontSize: 11.5, color: PeekColors.hint),
                     ),
