@@ -7,6 +7,7 @@ import '../../core/utils.dart';
 import '../../state/app_state.dart';
 import '../../widgets/common.dart';
 import 'appearance_page.dart';
+import 'auto_change_source_page.dart';
 import 'interface_config_page.dart';
 import 'misc_settings_pages.dart';
 import 'player_settings_page.dart';
@@ -126,6 +127,17 @@ class SettingsPage extends StatelessWidget {
               subtitle: '解码、缩放、长按倍速、自动换源',
               onTap: () => Navigator.of(context).push(
                 MaterialPageRoute(builder: (_) => const PlayerSettingsPage()),
+              ),
+            ),
+
+            // 5b. 自动换源（独立页，对齐原版站源开关列表）
+            PeekTile(
+              icon: Icons.swap_horiz,
+              title: '自动换源',
+              subtitle: '站源开关、等级标签、最多次数',
+              onTap: () => Navigator.of(context).push(
+                MaterialPageRoute(
+                    builder: (_) => const AutoChangeSourcePage()),
               ),
             ),
 

@@ -9,6 +9,7 @@ import '../../tvbox/models.dart';
 import '../../widgets/common.dart';
 import '../../widgets/poster_card.dart';
 import '../detail/detail_page.dart';
+import '../setting/auto_change_source_page.dart';
 
 /// 多元搜索页 —— 对齐原版 `T4SearchPage`。
 ///
@@ -387,7 +388,11 @@ class _MultiSearchPageState extends State<MultiSearchPage> {
         } else if (v == 'blocked') {
           _showBlockSheet(app);
         } else if (v == 'auto') {
-          _showAutoSheet();
+          Navigator.of(context).push(
+            MaterialPageRoute(
+              builder: (_) => const AutoChangeSourcePage(),
+            ),
+          );
         }
       },
       itemBuilder: (_) => [
@@ -413,8 +418,7 @@ class _MultiSearchPageState extends State<MultiSearchPage> {
                 Icon(Icons.check, size: 15, color: PeekColors.primary),
             ],
           ),
-        ),
-        const PopupMenuItem(
+        ),        const PopupMenuItem(
           value: 'blocked',
           height: 40,
           child: Text('参与搜索的源', style: TextStyle(fontSize: 13)),
@@ -510,93 +514,6 @@ class _MultiSearchPageState extends State<MultiSearchPage> {
     );
   }
 
-  /// 自动换源配置（原版 `t4_auto_change_source_config`）
-  Future<void> _showAutoSheet() async {
-    var c = AutoChangeSourceConfig.load();
-    await showModalBottomSheet<void>(
-      context: context,
-      backgroundColor: PeekColors.surfaceContainer,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setSheet) => SafeArea(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(18, 16, 8, 6),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Text('自动换源',
-                          style: TextStyle(
-                              fontSize: 15,
-                              fontWeight: FontWeight.w600,
-                              color: PeekColors.onSurface)),
-                    ),
-                    IconButton(
-                      onPressed: () => Navigator.of(ctx).pop(),
-                      icon: const Icon(Icons.close, size: 18),
-                    ),
-                  ],
-                ),
-              ),
-              SwitchListTile(
-                dense: true,
-                value: c.enabled,
-                onChanged: (v) async {
-                  c = c.copyWith(enabled: v);
-                  await AutoChangeSourceConfig.save(c);
-                  setSheet(() {});
-                },
-                title: const Text('播放失败时自动换源',
-                    style: TextStyle(fontSize: 13.5)),
-                subtitle: Text('播放器报错后用片名搜索其他源并跳转继续播放',
-                    style: TextStyle(fontSize: 11.5, color: PeekColors.hint)),
-              ),
-              SwitchListTile(
-                dense: true,
-                value: c.quickOnly,
-                onChanged: c.enabled
-                    ? (v) async {
-                        c = c.copyWith(quickOnly: v);
-                        await AutoChangeSourceConfig.save(c);
-                        setSheet(() {});
-                      }
-                    : null,
-                title: const Text('仅使用快搜源', style: TextStyle(fontSize: 13.5)),
-                subtitle: Text('只从标记了快搜的源里找，速度更快',
-                    style: TextStyle(fontSize: 11.5, color: PeekColors.hint)),
-              ),
-              ListTile(
-                dense: true,
-                title: const Text('最多换源次数', style: TextStyle(fontSize: 13.5)),
-                subtitle: Text('当前 ${c.maxAttempts} 次',
-                    style: TextStyle(
-                        fontSize: 11.5, color: PeekColors.hint)),
-                trailing: SizedBox(
-                  width: 160,
-                  child: Slider(
-                    value: c.maxAttempts.toDouble(),
-                    min: 1,
-                    max: 8,
-                    divisions: 7,
-                    label: '${c.maxAttempts}',
-                    onChanged: c.enabled
-                        ? (v) async {
-                            c = c.copyWith(maxAttempts: v.round());
-                            await AutoChangeSourceConfig.save(c);
-                            setSheet(() {});
-                          }
-                        : null,
-                  ),
-                ),
-              ),
-              const SizedBox(height: 12),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
 
   // ------------------------------------------------------------ 内容区
 
