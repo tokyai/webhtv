@@ -43,7 +43,28 @@ class SourceRuntime {
   final String sourceId;
   final String workDir;
   final String entryFile;
+
+  /// 期望端口（默认 9988）。
+  ///
+  /// ⚠️ **不等于实际监听端口**。源内部是这么选端口的：
+  ///
+  /// ```js
+  /// await hK0(Number(process.env.DEV_HTTP_PORT || process.env.PORT || 9988))
+  /// // EADDRINUSE 时：hK0(e + 1) —— 端口被占就自动 +1 重试
+  /// ```
+  ///
+  /// 也就是说：**只要 9988 被别的程序占着**（用户机器上很常见），源就会
+  /// 顺延到 9989、9990… 直到找到空闲端口。旧实现死等 [port]，于是必然
+  /// 超时报「等待服务就绪超时」→ `_svc.sites` 为空 → 搜索一个源都不发 →
+  /// 用户看到「搜不到东西」。实测复现：94609 占用时源落到 4174，
+  /// 宿主却一直在探 9988。
+  ///
+  /// 现在改为**从源输出里发现真实端口**（见 [actualPort]）。
   final int port;
+
+  /// 源实际监听的端口。启动前等于 [port]，解析到源输出后更新。
+  int _actualPort = 0;
+  int get actualPort => _actualPort == 0 ? port : _actualPort;
 
   NodeStatus status = NodeStatus.stopped;
   String? lastError;
@@ -64,7 +85,7 @@ class SourceRuntime {
   /// 最近的日志（环形，最多 200 行）。
   List<String> get log => List.unmodifiable(_log);
 
-  String get baseUrl => 'http://127.0.0.1:$port';
+  String get baseUrl => 'http://127.0.0.1:$actualPort';
 
   bool get isRunning => status == NodeStatus.running;
 
@@ -85,8 +106,9 @@ class SourceRuntime {
 
     final boot = File(p.join(workDir, '_bootstrap.cjs'));
     // `pid` 是 dart:io 的顶层 getter，返回当前（宿主）进程 PID。
-    // Node 侧用它作快速判据：ppid 一旦不等于它，说明宿主已退出。
-    // iOS 是同进程，ppid 判据无意义 → 传 0 让 bootstrap 跳过该分支。
+    // Node 侧仅在该值 > 0 时启用**心跳看护**（ppid 判据在 Windows 上默认关闭，
+    // 见 `_bootstrapScript` 里的说明）。
+    // iOS 是同进程、无孤儿问题 → 传 0 让 bootstrap 整段跳过。
     boot.writeAsStringSync(
       _bootstrapScript(entryFile, Platform.isIOS ? 0 : pid),
     );
@@ -105,24 +127,36 @@ class SourceRuntime {
       throw SourceRuntimeException(lastError!);
     }
 
-    final ok = await _waitForHealth(port);
-    if (!ok) {
-      status = NodeStatus.failed;
-      lastError = lastError ?? '等待服务就绪超时（端口 $port 无响应）';
-      await stop();
-      throw SourceRuntimeException(lastError!);
-    }
-    status = NodeStatus.running;
-
-    // 服务就绪后开始维持心跳（每 5 秒），子进程侧 TTL 为 15 秒。
-    // iOS 是同进程，无孤儿风险，不需要心跳。
+    // ⚠️⚠️ 心跳必须**在进程拉起后立刻开始**，不能等 `_waitForHealth` 成功。
+    //
+    // 这是「源服务起不来」最根本的一个时序 bug：
+    //   - 源的 bootstrap 看护每 2 秒检查 `.host-alive`，文件不存在会开始计时，
+    //     连续 3 秒读不到就 `process.exit(0)` 自杀（见 `_bootstrapScript`）。
+    //   - 而源从启动到 `/health` 可用要 15~35 秒（拉远端配置 + 加载 94 个站点）。
+    //   - 旧实现把 `Timer.periodic` 放在 `_waitForHealth` **之后**，于是源的
+    //     整个启动期都没有心跳 → **约 5 秒后必然自杀** → 宿主空等 30 秒超时
+    //     → `sites` 为空 → 用户看到「搜不到东西」。
+    //
+    // 现在改为「进程一起来就喂心跳」，直到 `stop()` 才停。
     if (!Platform.isIOS) {
       _heartbeat?.cancel();
+      _touchHeartbeat(); // 立刻写一次，避免 bootstrap 的首个 2 秒 tick 落空
       _heartbeat = Timer.periodic(
         const Duration(seconds: 5),
         (_) => _touchHeartbeat(),
       );
     }
+
+    final ok = await _waitForHealth();
+    if (!ok) {
+      status = NodeStatus.failed;
+      lastError = lastError ??
+          '等待服务就绪超时（端口 $actualPort 无响应，'
+              '期望 $port）';
+      await stop();
+      throw SourceRuntimeException(lastError!);
+    }
+    status = NodeStatus.running;
   }
 
   /// iOS：在本进程内起 Node（nodejs-mobile）。
@@ -294,6 +328,24 @@ class SourceRuntime {
     _log.add(line);
     if (_log.length > 200) _log.removeAt(0);
 
+    // ---- 动态端口发现 ----
+    //
+    // 源选定端口后会打印（fastify 的 ready 日志）：
+    //     Server listening at http://0.0.0.0:4174
+    // 另外源自己在端口被占时也会打印：
+    //     Port 9988 is already in use. Trying next available port...
+    // 两者都用来修正 [actualPort]，这样即使源顺延到别的端口，宿主也能找到它。
+    final m = _listenRe.firstMatch(line);
+    if (m != null) {
+      final p = int.tryParse(m.group(1)!);
+      if (p != null && p > 0 && p != _actualPort) {
+        _actualPort = p;
+        if (p != port) {
+          _log.add('[host] 源实际端口 $p（期望 $port，已自动跟随）');
+        }
+      }
+    }
+
     // `start()` 的非致命 rejection：源码实测会抛
     // `Cannot read properties of undefined (reading 'slice')`，
     // 但服务已监听成功。记录但不视为失败。
@@ -302,35 +354,71 @@ class SourceRuntime {
     }
   }
 
+  /// 从源输出里抓监听地址。兼容 fastify 的 `Server listening at http://…:PORT`
+  /// 以及 `listening on http://127.0.0.1:PORT` 之类写法。
+  static final RegExp _listenRe = RegExp(
+    r'(?:listening at|listening on|Server listening at)\s+https?://[^:]+:(\d{2,5})',
+    caseSensitive: false,
+  );
+
   /// 轮询 `/health` 直到 200 或超时（最多 30 秒）。
   ///
   /// 就绪判据是**服务自报名**：源程序的 `/health` 会返回含
   /// `CatVodSpiderios` 的响应体（见 backend_bridge 里的同款判据）。
   /// 只看端口连通性是不够的 —— 端口可能被别的程序占着。
   ///
+  /// 端口不再写死。源在 9988 被占时会 `EADDRINUSE → port+1` 顺延，因此
+  /// 这里按三层策略找它：
+  ///   ① 期望端口 [port]（9988）
+  ///   ② 已从 stdout 解析到的 [actualPort]
+  ///   ③ **[scanSpan] 个连续端口的扫描**（9988…9988+scanSpan-1）
+  ///
+  /// ③ 是兜底：源打印 `Server listening at …` 的时机/格式若与预期不符
+  /// （pino JSON、日志级别被调高等），仅靠 ② 会白等到超时。扫描段足够小
+  /// （默认 64 个端口），且每轮只探未命中的端口，开销可接受。
+  ///
   /// 子进程形态下额外检查 `_process == null`（进程已退出就没必要再等）；
   /// iOS 是同进程，没有这个信号，跳过。
-  Future<bool> _waitForHealth(int port) async {
-    final client = HttpClient()
-      ..connectionTimeout = const Duration(seconds: 2);
+  static const int scanSpan = 64;
+
+  Future<bool> _waitForHealth() async {
     final deadline = DateTime.now().add(const Duration(seconds: 30));
-    try {
-      while (DateTime.now().isBefore(deadline)) {
-        if (!Platform.isIOS && _process == null) return false;
-        try {
-          final req = await client
-              .getUrl(Uri.parse('http://127.0.0.1:$port/health'))
-              .timeout(const Duration(seconds: 2));
-          final resp = await req.close().timeout(const Duration(seconds: 2));
-          final body = await resp.transform(utf8.decoder).join();
-          if (resp.statusCode == 200 && body.contains('CatVodSpiderios')) {
-            return true;
-          }
-        } catch (_) {
-          // 尚未监听，继续等
-        }
-        await Future<void>.delayed(const Duration(milliseconds: 400));
+    while (DateTime.now().isBefore(deadline)) {
+      if (!Platform.isIOS && _process == null) return false;
+      // 候选端口：已发现的端口优先（命中率最高），其次是期望端口，
+      // 最后是整个扫描段。用 Set 去重。
+      final candidates = <int>{actualPort, port};
+      for (var i = 0; i < scanSpan; i++) {
+        candidates.add(port + i);
       }
+      // **并发**探测：串行 64 个端口 × 2 秒超时 = 单轮就要 2 分钟，必然超时。
+      // 并发后单轮耗时约等于最慢的一次探测（2 秒），且只要有一个命中就返回。
+      final results = await Future.wait(
+        candidates.map((c) => _healthOk(c)),
+      );
+      if (results.any((ok) => ok)) return true;
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+    }
+    return false;
+  }
+
+  Future<bool> _healthOk(int port) async {
+    // 每个探测独立建客户端：并发共享一个 HttpClient 时，`close(force:true)`
+    // 会互相干扰，且连接池会被慢端口占满。
+    final client = HttpClient()
+      ..connectionTimeout = const Duration(milliseconds: 800);
+    try {
+      final req = await client
+          .getUrl(Uri.parse('http://127.0.0.1:$port/health'))
+          .timeout(const Duration(milliseconds: 800));
+      final resp = await req.close().timeout(const Duration(milliseconds: 800));
+      final body = await resp.transform(utf8.decoder).join();
+      if (resp.statusCode == 200 && body.contains('CatVodSpiderios')) {
+        if (port != _actualPort) _actualPort = port;
+        return true;
+      }
+    } catch (_) {
+      // 该端口还没起 / 不是我们的服务
     } finally {
       client.close(force: true);
     }
@@ -387,30 +475,46 @@ process.on('uncaughtException', (err) => {
 //   窗口直接关闭。见 flutter/flutter#192304。
 //   因此必须在本进程内自保。
 //
-// 双判据，任一成立即退出：
+// 判据，任一成立即退出：
 //   A. 心跳文件：宿主每 5 秒 touch，超时 15 秒即认为宿主已死（**主判据**，
 //      语义准确，不受 PID 复用影响）
-//   B. 父进程 PID：`process.ppid` 不等于启动时记录的宿主 PID，立即退出
-//      （**快速判据**，秒级发现；仅作加速，单独使用不可靠）
+//   B. 父进程 PID：`process.ppid` 不等于启动时记录的宿主 PID 时退出。
+//
+// ⚠️⚠️ 判据 B 在 **Windows 上不可靠，默认关闭** —— 这是「源服务起不来、
+// 搜索一个源都没有」的真凶之一。
+//
+// 实测：Flutter 用 `Process.start` 起 node 后，Node 侧读到的 `process.ppid`
+// **并不稳定等于** Flutter 进程 PID（进程组/作业对象重排会让它取到中间进程；
+// 某些环境下还会随句柄回收而变化）。于是判据 B 在启动约 4 秒后命中，
+// 源打印「宿主 PID 已变化」并 `process.exit(0)` 自杀 —— 而此时
+// `wexfnwconfig.json` 已经写出，看起来「启动成功了」，实际上进程已经没了。
+// 宿主随后在 `_waitForHealth` 里空等 30 秒 → 判定失败 → `sites` 为空。
+//
+// 现在只保留判据 A（心跳）。它对孤儿进程同样有效：宿主真的死了，
+// 心跳文件就不再被 touch，15 秒后源自退 —— 这正是我们需要的语义。
+// 判据 B 仅在显式传入 `HOST_PID_STRICT=1` 时启用（供将来排查使用）。
+//
+// 为什么当初会加判据 B：想「秒级」发现宿主退出。但代价是误杀，且心跳
+// 15 秒的窗口对释放端口而言完全够用（用户下次启动一般在 15 秒之后）。
 //
 // iOS 传入 HOST_PID = 0 → 整段跳过（同进程，无孤儿问题）。
 // ---------------------------------------------------------------------------
 const hbPath = path.join(__dirname, '.host-alive');
 const HB_TTL_MS = 15000;
 const HOST_PID = $hostPid;
+const STRICT_PPID = process.env.HOST_PID_STRICT === '1';
 
 if (HOST_PID > 0) {
   let hbMissingSince = 0;
   let pidMismatchTicks = 0;
 
   setInterval(() => {
-    // ---- 判据 B：父进程 PID 变化（快速路径）----
-    // 只在明确不等时才计数，连续 2 次（约 4 秒）确认，避免进程组重排误判。
-    if (process.ppid !== HOST_PID) {
+    // ---- 判据 B：父进程 PID 变化（**默认关闭，见上**）----
+    if (STRICT_PPID && process.ppid !== HOST_PID) {
       pidMismatchTicks++;
       if (pidMismatchTicks >= 2) {
         console.log('[host] 宿主 PID 已变化 (ppid=' + process.ppid +
-          ', expected=' + HOST_PID + ')，自行退出以释放端口 9988');
+          ', expected=' + HOST_PID + ')，自行退出');
         process.exit(0);
       }
     } else {
@@ -435,7 +539,7 @@ if (HOST_PID > 0) {
     }
     // 给予宽限期：宿主可能在启动早期还没写心跳
     if (Date.now() - hbMissingSince > 3000) {
-      console.log('[host] 宿主心跳丢失，自行退出以释放端口 9988');
+      console.log('[host] 宿主心跳丢失，自行退出以释放端口');
       process.exit(0);
     }
   }, 2000);

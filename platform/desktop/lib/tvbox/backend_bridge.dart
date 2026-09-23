@@ -322,15 +322,17 @@ class SourceService {
     // 同一个源服务**（`/health` 返回 CatVodSpiderios）。此时用户看到的是
     // 「端口被占用」——明明是自己的服务，却既连不上也不让起新的。
     //
-    // 现在改为三态判定：
+    // 三态判定：
     //   free        → 正常拉起新进程
     //   sameService → 该端口上就是同一个源服务，**直接复用**，不重复起进程
-    //   foreign     → 别的程序占着，这才报错（无法安全抢占）
+    //   foreign     → 别的程序占着。**不再报错**，而是照常拉起 ——
+    //                 源内部有端口顺延逻辑（`EADDRINUSE → port+1` 重试），
+    //                 [SourceRuntime] 会从源输出里发现真实端口并跟随。
+    //
+    // ⚠️ 这里曾是「搜不到东西」的真凶：旧代码把 foreign 直接判为致命错误，
+    // 于是只要用户机器上 9988 被占，源服务就永远起不来 → `sites` 为空 →
+    // 搜索一个源都不发 → 界面只剩「没有搜索到相关内容」。
     final probe = await _probePort(9988);
-
-    if (probe == _PortState.foreign) {
-      return '端口 9988 已被其他程序占用。源服务的端口是固定的，请先释放该端口。';
-    }
 
     if (probe == _PortState.sameService) {
       // 复用既有服务：不新建进程，只把客户端接上去。
@@ -351,6 +353,8 @@ class SourceService {
         (_) => _touchAdoptedHeartbeat(hbDir),
       );
     } else {
+      // free 或 foreign 都走这里：foreign 时源会自己顺延到空闲端口，
+      // [SourceRuntime] 从输出解析实际端口后写进 `baseUrl`。
       final runtime = SourceRuntime(
         sourceId: cfg.id,
         workDir: p.join(_runtimeRoot.path, cfg.id),
