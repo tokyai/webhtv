@@ -139,6 +139,26 @@ case "$MODE" in
   release) OUTDIR="build/windows/x64/runner/Release" ;;
   debug)   OUTDIR="build/windows/x64/runner/Debug" ;;
 esac
+
+# --- 第 5 步：部署 Node 运行时 ---
+#
+# **必须做**：应用依赖 runtime/node.exe 承载 drpyS 源服务。缺了它，
+# 源服务子进程起不来，所有搜索/首页/播放全部失败（界面表现为
+# 「聚合搜索 0 结果」，但端口探测又像是通的，极难定位）。
+#
+# 历史上这步只在 `package_windows.sh`（打包 Release）里做，导致
+# **Debug 产物永远缺 node.exe** —— 本地调试跑 Debug 时必然踩这个坑。
+# 现在统一由本脚本负责，两种模式都不会漏。
+if [ -f "$PROJ/scripts/deploy_node.sh" ]; then
+  if ! bash "$PROJ/scripts/deploy_node.sh" "$MODE"; then
+    echo "[build] 错误: Node 运行时部署失败。应用将无法启动源服务。" >&2
+    echo "[build] 请确认 assets/runtime/node.exe 存在，或系统 PATH 中有 node。" >&2
+    exit 1
+  fi
+else
+  echo "[build] 警告: 找不到 scripts/deploy_node.sh，产物将缺少 runtime/node.exe" >&2
+fi
+
 echo "[build] 完成。产物: $PROJ/$OUTDIR/"
 if [ -f "$PROJ/$OUTDIR/webhtv_win.exe" ]; then
   echo "[build]   可执行文件: $OUTDIR/webhtv_win.exe"
