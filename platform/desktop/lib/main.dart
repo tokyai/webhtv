@@ -5,8 +5,10 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
 
+import 'core/debug_log.dart';
 import 'core/nav.dart';
 import 'core/storage.dart';
 import 'core/theme.dart';
@@ -26,6 +28,24 @@ Future<void> main() async {
   MediaKit.ensureInitialized();
 
   await Store.init();
+
+  // 调试日志落盘。
+  //
+  // 为什么落盘：用户报「搜不到结果」时，界面本身无法区分下面几种情况 ——
+  //   ① 源服务没起来（一个源都没搜）
+  //   ② 源起来了但所有源都超时
+  //   ③ 拿到了数据但客户端没渲染
+  // 把每一步写进文件后，复现一次就能拿到铁证（见 `DebugLog.enableFileSink`）。
+  // 位置：<应用支持目录>/logs/search.log
+  try {
+    final dir = await getApplicationSupportDirectory();
+    await DebugLog.enableFileSink(
+      File('${dir.path}${Platform.pathSeparator}logs'
+          '${Platform.pathSeparator}search.log'),
+    );
+  } catch (_) {
+    // 落盘失败不影响功能
+  }
 
   // 退出前回收 Node 子进程。
   //
