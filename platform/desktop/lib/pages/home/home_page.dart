@@ -11,7 +11,6 @@ import '../detail/detail_page.dart';
 import '../favorite_page.dart';
 import '../history_page.dart';
 import '../search/multi_search_page.dart';
-import '../search/search_page.dart';
 import 'source_picker.dart';
 
 /// 首页。
@@ -251,8 +250,17 @@ class HomePageState extends State<HomePage> {
         const SizedBox(height: 20),
         _TopBar(
           title: _title,
+          // 顶栏放大镜 → 多元搜索页（原版 `T4SearchPage`）。
+          //
+          // ⚠️ 这里以前指向 `SearchPage`（旧的单页版实现），它有独立的
+          // 「视图模式」侧栏，且走的是 `AppState.searchAll` —— 那条路径
+          // 内部把单源超时写死 12 秒，93 源并发时慢源全被砍掉，用户看到
+          // 的就是「没有搜索到相关内容」。已统一到 `MultiSearchPage`，
+          // 与详情页「快搜」、换源、首页无源跳转保持同一实现。
           onSearch: () => Navigator.of(context).push(
-            MaterialPageRoute(builder: (_) => const SearchPage()),
+            MaterialPageRoute(
+              builder: (_) => const MultiSearchPage(keyword: ''),
+            ),
           ),
           onSwitchSource: () => showSourcePicker(context),
           onHistory: () => Navigator.of(context).push(
