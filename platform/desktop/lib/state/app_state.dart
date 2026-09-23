@@ -135,6 +135,17 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// 多元搜索页布局：`true` = 上下布局（顶部横排站点 chips），
+  /// `false` = 网格视图（左侧纵向站源栏）。对应原版顶栏第 4 个切换按钮，
+  /// 选择会持久化并跨会话保留（原版行为）。
+  bool get multiSearchStacked =>
+      Store.get<bool>('multiSearchStacked', true);
+
+  Future<void> setMultiSearchStacked(bool v) async {
+    await Store.set('multiSearchStacked', v);
+    notifyListeners();
+  }
+
   Site? get currentSite {
     final list = sites;
     if (list.isEmpty) return null;

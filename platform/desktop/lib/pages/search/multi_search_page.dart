@@ -1,3 +1,4 @@
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
@@ -138,32 +139,160 @@ class _MultiSearchPageState extends State<MultiSearchPage> {
 
   @override
   Widget build(BuildContext context) {
+    final app = context.watch<AppState>();
+    // 上下布局：顶部横排站点 chips；网格视图：左侧纵向站源栏。
+    // 原版由顶栏第 4 个按钮切换，选择持久化。
+    final stacked = app.multiSearchStacked;
     final wide = MediaQuery.of(context).size.width >= 900;
     return Scaffold(
       backgroundColor: PeekColors.surface,
       body: SafeArea(
         child: Row(
           children: [
-            // 左侧站源栏 —— 原版侧边显示分源结果
-            _SourceRail(
-              width: wide ? 188 : 132,
-              order: _order,
-              bySource: _bySource,
-              focus: _focus,
-              searching: _searching,
-              done: _done,
-              total: _total,
-              onPick: (k) => setState(() => _focus = k),
-            ),
+            // 网格视图：左侧站源栏
+            if (!stacked || widget.autoChange)
+              _SourceRail(
+                width: wide ? 188 : 132,
+                order: _order,
+                bySource: _bySource,
+                focus: _focus,
+                searching: _searching,
+                done: _done,
+                total: _total,
+                onPick: (k) => setState(() => _focus = k),
+              ),
             Expanded(
               child: Column(
                 children: [
                   _header(),
+                  // 上下布局：顶部横排站点 chips（会换行到第二行，可横滑）
+                  if (stacked && !widget.autoChange) _chipBar(),
                   Expanded(child: _body()),
                 ],
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+
+  /// 顶部横排站点 chips —— 原版「上下布局」的站点导航。
+  ///
+  /// 每个 chip 显示 `站名 + 结果数`，选中态高亮并带 ✓；「全部」chip 带总数。
+  /// 横向可滑动，放不下时自动换行到第二行。
+  Widget _chipBar() {
+    var hits = 0;
+    for (final l in _bySource.values) {
+      hits += l.length;
+    }
+    return SizedBox(
+      height: 62,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(
+                PeekColors.contentPadding, 4, PeekColors.contentPadding, 0),
+            child: Row(
+              children: [
+                Text('站源',
+                    style: TextStyle(
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w600,
+                        color: PeekColors.primary)),
+                const SizedBox(width: 8),
+                Text(
+                  _searching ? '$_done/$_total' : '${_order.length}',
+                  style: TextStyle(fontSize: 12, color: PeekColors.hint),
+                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.symmetric(
+                  horizontal: PeekColors.contentPadding),
+              child: Row(
+                children: [
+                  _chip(
+                    label: '全部',
+                    count: hits,
+                    selected: _focus == null,
+                    onTap: () => setState(() => _focus = null),
+                  ),
+                  for (final s in _order)
+                    _chip(
+                      label: s.name,
+                      count: (_bySource[s.key] ?? const []).length,
+                      selected: _focus == s.key,
+                      onTap: () => setState(
+                          () => _focus = _focus == s.key ? null : s.key),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _chip({
+    required String label,
+    required int count,
+    required bool selected,
+    required VoidCallback onTap,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.only(right: 8, top: 4, bottom: 6),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(8),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+          decoration: BoxDecoration(
+            color: selected
+                ? PeekColors.primaryContainer
+                : PeekColors.surfaceContainerHigh,
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(
+              color: selected ? PeekColors.primary : Colors.transparent,
+            ),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: 12.5,
+                  fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
+                  color: selected
+                      ? PeekColors.onPrimaryContainer
+                      : count == 0
+                          ? PeekColors.railIdle
+                          : PeekColors.onSurfaceVariant,
+                ),
+              ),
+              const SizedBox(width: 6),
+              Text(
+                '$count',
+                style: TextStyle(
+                  fontSize: 11.5,
+                  color: selected
+                      ? PeekColors.onPrimaryContainer
+                      : PeekColors.hint,
+                ),
+              ),
+              if (selected) ...[
+                const SizedBox(width: 5),
+                Icon(Icons.check,
+                    size: 13, color: PeekColors.onPrimaryContainer),
+              ],
+            ],
+          ),
         ),
       ),
     );
@@ -218,6 +347,27 @@ class _MultiSearchPageState extends State<MultiSearchPage> {
             child: const Text('搜索', style: TextStyle(fontSize: 13)),
           ),
           const SizedBox(width: 10),
+          // 布局切换：上下布局 ↔ 网格视图（原版顶栏第 4 个按钮）
+          IconButton(
+            tooltip: widget.autoChange
+                ? '换源模式固定使用网格视图'
+                : (context.watch<AppState>().multiSearchStacked
+                    ? '切换到网格视图'
+                    : '切换到上下布局'),
+            onPressed: widget.autoChange
+                ? null
+                : () => context
+                    .read<AppState>()
+                    .setMultiSearchStacked(
+                        !context.read<AppState>().multiSearchStacked),
+            icon: Icon(
+              context.watch<AppState>().multiSearchStacked
+                  ? Icons.view_agenda_outlined
+                  : Icons.grid_view_outlined,
+              size: 20,
+            ),
+          ),
+          const SizedBox(width: 6),
           _menu(),
           const SizedBox(width: 10),
         ],
@@ -579,6 +729,15 @@ class _MultiSearchPageState extends State<MultiSearchPage> {
         else
           LayoutBuilder(
             builder: (context, c) {
+              // 竖屏窄屏：原版用「海报 + 标题 + 源角标 + 题材标签」的横排列表卡
+              if (c.maxWidth < 620) {
+                return Column(
+                  children: [
+                    for (final v in items)
+                      _resultRow(site, v, app),
+                  ],
+                );
+              }
               final w = c.maxWidth - PeekColors.contentPadding;
               const gap = PeekColors.gridGap;
               final cols = ((w + gap) / (181 + gap)).round().clamp(2, 8);
@@ -607,6 +766,98 @@ class _MultiSearchPageState extends State<MultiSearchPage> {
         SizedBox(height: 4),
         Divider(height: 1, color: PeekColors.railDivider),
       ],
+    );
+  }
+
+  /// 竖屏横排结果卡（原版竖屏列表观感）：
+  /// 左海报 + 右标题 / 源角标 / 题材标签。
+  Widget _resultRow(Site site, Vod vod, AppState app) {
+    final tags = <String>[
+      if (vod.typeName.isNotEmpty) vod.typeName,
+      if (vod.year.isNotEmpty) vod.year,
+      if (vod.area.isNotEmpty) vod.area,
+      if (vod.remarks.isNotEmpty) vod.remarks,
+    ];
+    return InkWell(
+      onTap: () => _open(site, vod),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 7),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            ClipRRect(
+              borderRadius: BorderRadius.circular(6),
+              child: SizedBox(
+                width: 74,
+                height: 100,
+                child: vod.pic.isEmpty
+                    ? Container(color: PeekColors.surfaceContainerHigh)
+                    : CachedNetworkImage(
+                        imageUrl: vod.pic,
+                        fit: BoxFit.cover,
+                        errorWidget: (_, __, ___) => Container(
+                            color: PeekColors.surfaceContainerHigh),
+                      ),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    vod.name,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                        fontSize: 14.5,
+                        fontWeight: FontWeight.w600,
+                        color: PeekColors.onSurface),
+                  ),
+                  const SizedBox(height: 7),
+                  Row(
+                    children: [
+                      Icon(Icons.folder_outlined,
+                          size: 13, color: PeekColors.onSurfaceVariant),
+                      const SizedBox(width: 5),
+                      Flexible(
+                        child: Text(
+                          site.name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                              fontSize: 12, color: PeekColors.onSurfaceVariant),
+                        ),
+                      ),
+                    ],
+                  ),
+                  if (tags.isNotEmpty) ...[
+                    const SizedBox(height: 7),
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 5,
+                      children: [
+                        for (final t in tags)
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 6, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: PeekColors.surfaceContainerHigh,
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                            child: Text(t,
+                                style: TextStyle(
+                                    fontSize: 11, color: PeekColors.hint)),
+                          ),
+                      ],
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -683,9 +934,27 @@ class _SourceRail extends StatelessWidget {
             child: ListView(
               padding: const EdgeInsets.fromLTRB(8, 0, 8, 12),
               children: [
-                _item(null, '全部源', hits),
+                if (width < 150)
+                  _RailItemNarrow(
+                    label: '全部',
+                    count: hits,
+                    selected: focus == null,
+                    empty: hits == 0,
+                    onTap: () => onPick(null),
+                  )
+                else
+                  _item(null, '全部源', hits),
                 for (final s in order)
-                  _item(s.key, s.name, (bySource[s.key] ?? const []).length),
+                  if (width < 150)
+                    _RailItemNarrow(
+                      label: s.name,
+                      count: (bySource[s.key] ?? const []).length,
+                      selected: focus == s.key,
+                      empty: (bySource[s.key] ?? const []).isEmpty,
+                      onTap: () => onPick(s.key),
+                    )
+                  else
+                    _item(s.key, s.name, (bySource[s.key] ?? const []).length),
               ],
             ),
           ),
@@ -730,6 +999,87 @@ class _SourceRail extends StatelessWidget {
                   style: TextStyle(
                       fontSize: 11,
                       color: sel ? PeekColors.primary : PeekColors.hint)),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 竖屏窄栏下的站源项：三行布局，对齐原版竖屏观感
+/// (`站名` / 源等级 `4K` / `N 个结果`)。
+class _RailItemNarrow extends StatelessWidget {
+  final String label;
+  final int count;
+  final bool selected;
+  final bool empty;
+  final VoidCallback onTap;
+
+  const _RailItemNarrow({
+    required this.label,
+    required this.count,
+    required this.selected,
+    required this.empty,
+    required this.onTap,
+  });
+
+  /// 从站名里抽源等级标签（原版站名常形如 `💗花卷┃4K💗`）。
+  String get _tier {
+    for (final t in const ['4K', '秒播', 'T3', 'T4']) {
+      if (label.contains(t)) return t;
+    }
+    return '';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final tier = _tier;
+    final name = label
+        .replaceAll('┃4K', '')
+        .replaceAll('|4K', '')
+        .replaceAll('┃秒播', '')
+        .replaceAll('|秒播', '');
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(8),
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 4),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+        decoration: BoxDecoration(
+          color: selected ? PeekColors.surfaceContainerHigh : null,
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              name,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
+                color: selected
+                    ? PeekColors.primary
+                    : empty
+                        ? PeekColors.railIdle
+                        : PeekColors.onSurfaceVariant,
+              ),
+            ),
+            if (tier.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: Text(tier,
+                    style: TextStyle(
+                        fontSize: 10.5,
+                        color: selected ? PeekColors.primary : PeekColors.hint)),
+              ),
+            Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: Text('$count 个结果',
+                  style:
+                      TextStyle(fontSize: 10.5, color: PeekColors.hint)),
+            ),
           ],
         ),
       ),
