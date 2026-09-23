@@ -88,6 +88,14 @@ class _MultiSearchPageState extends State<MultiSearchPage> {
     FocusScope.of(context).unfocus();
     if (!widget.autoChange) await Store.addSearchHistory(keyword);
     if (!mounted) return;
+
+    final app = context.read<AppState>();
+    // 站点原序：并发回调的到达顺序是「谁先返回谁先到」，直接 `_order.add`
+    // 会让侧栏顺序每次搜索都不一样（实测完成时间从 0.6s 到 20s 跨度极大）。
+    // 这里先取一份权威顺序，回调里只写 `_bySource`，结束后按原序重建 `_order`。
+    final ordered = app.searchSources(onlyDefault: app.searchOnlyDefaultSource);
+    final pending = <String, Site>{for (final s in ordered) s.key: s};
+
     setState(() {
       _searching = true;
       _searched = true;
@@ -98,28 +106,48 @@ class _MultiSearchPageState extends State<MultiSearchPage> {
       _bySource.clear();
       _focus = null;
     });
-    final app = context.read<AppState>();
+
     await app.searchBySource(
       keyword,
       onlyDefault: app.searchOnlyDefaultSource,
       onResult: (site, items, done, total) {
         if (!mounted) return;
         setState(() {
+          // 搜索过程中：有结果的源**实时上屏**，让用户尽快看到东西。
+          _bySource[site.key] = items;
           if (items.isNotEmpty) {
-            _order.add(site);
-            _bySource[site.key] = items;
-            _totalHits += items.length;
-          } else {
-            // 空结果的源也记进侧边栏，显示为「无结果」（原版行为）
             if (!_order.any((s) => s.key == site.key)) _order.add(site);
-            _bySource[site.key] = const <Vod>[];
+            _totalHits += items.length;
           }
           _done = done;
           _total = total;
         });
       },
     );
-    if (mounted) setState(() => _searching = false);
+    if (!mounted) return;
+    setState(() {
+      _searching = false;
+      // 搜索结束：按**站点原序**重建，且**只保留有结果的源**。
+      //
+      // 用户要求「把没有结果的站点从两侧分栏中剔除，只保留有条数结果的标签
+      // 和结果列表」。搜索过程中不剔除（否则侧栏会不断跳动、也看不出进度），
+      // 结束后一次性收拢。这样侧栏的条目数 = 真正能用的源数，不再被
+      // 「站名 0」刷屏。
+      _order
+        ..clear()
+        ..addAll([
+          for (final s in ordered)
+            if ((_bySource[s.key] ?? const <Vod>[]).isNotEmpty) s,
+        ]);
+      // `_focus` 指向的源可能已被剔除。
+      if (_focus != null && !_order.any((s) => s.key == _focus)) {
+        _focus = null;
+      }
+      // 清理没有结果的源，避免 `_bySource` 里留一堆空列表。
+      _bySource.removeWhere((k, v) => v.isEmpty);
+      // pending 仅为可读性保留（原序已在 `ordered` 中体现）。
+      pending.clear();
+    });
   }
 
   /// 打开某个结果。
@@ -140,160 +168,42 @@ class _MultiSearchPageState extends State<MultiSearchPage> {
 
   @override
   Widget build(BuildContext context) {
-    final app = context.watch<AppState>();
-    // 上下布局：顶部横排站点 chips；网格视图：左侧纵向站源栏。
-    // 原版由顶栏第 4 个按钮切换，选择持久化。
-    final stacked = app.multiSearchStacked;
-    final wide = MediaQuery.of(context).size.width >= 900;
+    // 统一为**左侧站源栏 + 右侧结果区**，不再区分「上下布局 / 网格视图」。
+    //
+    // ⚠️ 历史包袱：这里曾有两套并行 UI —— `multiSearchStacked=false` 走左侧
+    // `_SourceRail`，`true` 走顶部 `_chipBar`。默认值是 `true`，于是**绝大多数
+    // 用户看到的都是顶部 chips 条，左侧站源栏根本不渲染**。用户反馈「点击搜索
+    // 图标进行搜索，结果怎么没有左侧站点的导航标签」，根因就在这里。
+    //
+    // 而且 44 个空结果源会全被塞进 chips 条，稠密的「站名 0」让用户误以为
+    // 「没搜到结果」。现统一成单一实现：任何尺寸都用左侧栏，窄屏自动收窄。
+    final w = MediaQuery.of(context).size.width;
+    // 三档宽度：宽屏 188 / 中屏 152 / 窄屏 118（竖屏手机）。
+    final railW = w >= 900 ? 188.0 : (w >= 600 ? 152.0 : 118.0);
     return Scaffold(
       backgroundColor: PeekColors.surface,
       body: SafeArea(
         child: Row(
           children: [
-            // 网格视图：左侧站源栏
-            if (!stacked || widget.autoChange)
-              _SourceRail(
-                width: wide ? 188 : 132,
-                order: _order,
-                bySource: _bySource,
-                focus: _focus,
-                searching: _searching,
-                done: _done,
-                total: _total,
-                onPick: (k) => setState(() => _focus = k),
-              ),
+            _SourceRail(
+              width: railW,
+              order: _order,
+              bySource: _bySource,
+              focus: _focus,
+              searching: _searching,
+              done: _done,
+              total: _total,
+              onPick: (k) => setState(() => _focus = k),
+            ),
             Expanded(
               child: Column(
                 children: [
                   _header(),
-                  // 上下布局：顶部横排站点 chips（会换行到第二行，可横滑）
-                  if (stacked && !widget.autoChange) _chipBar(),
                   Expanded(child: _body()),
                 ],
               ),
             ),
           ],
-        ),
-      ),
-    );
-  }
-
-  /// 顶部横排站点 chips —— 原版「上下布局」的站点导航。
-  ///
-  /// 每个 chip 显示 `站名 + 结果数`，选中态高亮并带 ✓；「全部」chip 带总数。
-  /// 横向可滑动，放不下时自动换行到第二行。
-  Widget _chipBar() {
-    var hits = 0;
-    for (final l in _bySource.values) {
-      hits += l.length;
-    }
-    return SizedBox(
-      height: 62,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(
-                PeekColors.contentPadding, 4, PeekColors.contentPadding, 0),
-            child: Row(
-              children: [
-                Text('站源',
-                    style: TextStyle(
-                        fontSize: 12.5,
-                        fontWeight: FontWeight.w600,
-                        color: PeekColors.primary)),
-                const SizedBox(width: 8),
-                Text(
-                  _searching ? '$_done/$_total' : '${_order.length}',
-                  style: TextStyle(fontSize: 12, color: PeekColors.hint),
-                ),
-              ],
-            ),
-          ),
-          Expanded(
-            child: SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              padding: const EdgeInsets.symmetric(
-                  horizontal: PeekColors.contentPadding),
-              child: Row(
-                children: [
-                  _chip(
-                    label: '全部',
-                    count: hits,
-                    selected: _focus == null,
-                    onTap: () => setState(() => _focus = null),
-                  ),
-                  for (final s in _order)
-                    _chip(
-                      label: s.name,
-                      count: (_bySource[s.key] ?? const []).length,
-                      selected: _focus == s.key,
-                      onTap: () => setState(
-                          () => _focus = _focus == s.key ? null : s.key),
-                    ),
-                ],
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _chip({
-    required String label,
-    required int count,
-    required bool selected,
-    required VoidCallback onTap,
-  }) {
-    return Padding(
-      padding: const EdgeInsets.only(right: 8, top: 4, bottom: 6),
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(8),
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
-          decoration: BoxDecoration(
-            color: selected
-                ? PeekColors.primaryContainer
-                : PeekColors.surfaceContainerHigh,
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(
-              color: selected ? PeekColors.primary : Colors.transparent,
-            ),
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                label,
-                style: TextStyle(
-                  fontSize: 12.5,
-                  fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
-                  color: selected
-                      ? PeekColors.onPrimaryContainer
-                      : count == 0
-                          ? PeekColors.railIdle
-                          : PeekColors.onSurfaceVariant,
-                ),
-              ),
-              const SizedBox(width: 6),
-              Text(
-                '$count',
-                style: TextStyle(
-                  fontSize: 11.5,
-                  color: selected
-                      ? PeekColors.onPrimaryContainer
-                      : PeekColors.hint,
-                ),
-              ),
-              if (selected) ...[
-                const SizedBox(width: 5),
-                Icon(Icons.check,
-                    size: 13, color: PeekColors.onPrimaryContainer),
-              ],
-            ],
-          ),
         ),
       ),
     );
@@ -348,27 +258,8 @@ class _MultiSearchPageState extends State<MultiSearchPage> {
             child: const Text('搜索', style: TextStyle(fontSize: 13)),
           ),
           const SizedBox(width: 10),
-          // 布局切换：上下布局 ↔ 网格视图（原版顶栏第 4 个按钮）
-          IconButton(
-            tooltip: widget.autoChange
-                ? '换源模式固定使用网格视图'
-                : (context.watch<AppState>().multiSearchStacked
-                    ? '切换到网格视图'
-                    : '切换到上下布局'),
-            onPressed: widget.autoChange
-                ? null
-                : () => context
-                    .read<AppState>()
-                    .setMultiSearchStacked(
-                        !context.read<AppState>().multiSearchStacked),
-            icon: Icon(
-              context.watch<AppState>().multiSearchStacked
-                  ? Icons.view_agenda_outlined
-                  : Icons.grid_view_outlined,
-              size: 20,
-            ),
-          ),
-          const SizedBox(width: 6),
+          // 布局切换按钮已移除 —— 现在统一使用左侧站源栏，
+          // 不再有「上下布局 / 网格视图」两套 UI（见 build 里的说明）。
           _menu(),
           const SizedBox(width: 10),
         ],
@@ -621,9 +512,14 @@ class _MultiSearchPageState extends State<MultiSearchPage> {
       );
     }
     if (_totalHits == 0 && !_searching) {
+      // ⚠️ 这里以前用 `_order.length` 报「已搜索 N 个站源」。现在 `_order`
+      // 在搜索结束后只保留**有结果**的源（空结果源已被剔除），那样会报
+      // 「已搜索 0 个站源」，与实际搜了几十个源完全不符。改用 `_total`
+      // （本轮参与搜索的源总数），才是用户想知道的数字。
+      final scanned = _total > 0 ? _total : _order.length;
       return PeekEmpty(
         icon: Icons.search_off_outlined,
-        text: '没有搜索到「${_ctrl.text}」相关内容\n已搜索 ${_order.length} 个站源',
+        text: '没有搜索到「${_ctrl.text}」相关内容\n已搜索 $scanned 个站源',
       );
     }
     return _groupedList();
@@ -631,9 +527,20 @@ class _MultiSearchPageState extends State<MultiSearchPage> {
 
   /// 按源分组渲染（原版核心观感：分源显示搜索结果）
   Widget _groupedList() {
-    final keys = _focus != null
-        ? <Site>[_order.firstWhere((s) => s.key == _focus)]
-        : _order;
+    // ⚠️ `_focus` 可能指向一个**本轮已不在 `_order` 里**的站点（例如上一轮选中的
+    // 源这一轮超时、被屏蔽，或用户在搜索中途切了源）。原先这里直接
+    // `_order.firstWhere(...)` 且**没有 `orElse`** —— 找不到就抛 `StateError`，
+    // 整个结果区变成红色报错页。现在退回「全部」，语义上也更合理。
+    Site? focused;
+    if (_focus != null) {
+      for (final s in _order) {
+        if (s.key == _focus) {
+          focused = s;
+          break;
+        }
+      }
+    }
+    final keys = focused != null ? <Site>[focused] : _order;
     final app = context.watch<AppState>();
 
     return ListView.builder(
@@ -913,13 +820,22 @@ class _SourceRail extends StatelessWidget {
                         color: PeekColors.primary)),
                 SizedBox(height: 4),
                 Text(
-                  searching ? '$done/$total' : '${order.length} 源 · $hits 结果',
+                  // 搜索中：显示进度（已回/总数），此时侧栏在**实时增长**
+                  // （有结果的源随到随上屏）；结束后：显示最终统计。
+                  searching
+                      ? '$done/$total'
+                      : '${order.length} 源 · $hits 结果',
                   style:
                       TextStyle(fontSize: 11, color: PeekColors.hint),
                 ),
                 if (searching) ...[
                   const SizedBox(height: 8),
                   const LinearProgressIndicator(minHeight: 2),
+                  const SizedBox(height: 6),
+                  // 空结果源在搜索结束后才被剔除，这里提示一下，避免用户
+                  // 以为「侧栏只有这几个源」。
+                  Text('搜索中，空结果的源稍后自动隐藏',
+                      style: TextStyle(fontSize: 10.5, color: PeekColors.railIdle)),
                 ],
               ],
             ),

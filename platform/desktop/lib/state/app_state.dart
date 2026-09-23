@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 
 import '../backend/source_config.dart';
 import '../core/http.dart';
+import '../core/netdisk_sources.dart';
 import '../core/storage.dart';
 import '../core/utils.dart';
 import '../tvbox/backend_bridge.dart';
@@ -116,10 +117,16 @@ class AppState extends ChangeNotifier {
   List<Site> get quickSearchSites =>
       searchableSites.where((s) => s.quickSearch).toList();
 
-  /// 参与搜索的源集合（减去用户屏蔽列表）。
+  /// 参与搜索的源集合（减去用户屏蔽列表，以及可选的网盘源）。
+  ///
+  /// [showAllSites] 为 false 时，额外剔除**已知需要登录的网盘源**
+  /// （夸克 / 百度 / UC / 迅雷 / 115）。判定见 [NetdiskSources]。
   List<Site> searchSources({bool onlyDefault = false}) {
     final blocked = BlockedSearchSources.all;
     var list = quickSearchSites.where((s) => !blocked.contains(s.key));
+    if (!showAllSites) {
+      list = list.where((s) => !NetdiskSources.isNetdisk(s.key));
+    }
     if (onlyDefault) {
       final cur = currentSite;
       if (cur != null) list = list.where((s) => s.key == cur.key);
@@ -127,22 +134,28 @@ class AppState extends ChangeNotifier {
     return list.toList();
   }
 
+  /// 「全部站点显示」开关。
+  ///
+  /// - `true`（默认）：保持原有逻辑，所有源都参与搜索。
+  /// - `false`：屏蔽需要登录的网盘源（4K 分享类），避免点进去才发现
+  ///   要登录夸克/百度而播不了。
+  ///
+  /// 默认 **true** —— 与现有行为完全一致，不给老用户带来变化。
+  bool get showAllSites => Store.get<bool>('showAllSites', true);
+
+  Future<void> setShowAllSites(bool v) async {
+    await Store.set('showAllSites', v);
+    notifyListeners();
+  }
+
+  /// 已识别为网盘源的数量（设置页展示用）。
+  int get netdiskSourceCount => NetdiskSources.known.length;
+
   bool get searchOnlyDefaultSource =>
       Store.get<bool>('searchOnlyDefaultSource', false);
 
   Future<void> setSearchOnlyDefaultSource(bool v) async {
     await Store.set('searchOnlyDefaultSource', v);
-    notifyListeners();
-  }
-
-  /// 多元搜索页布局：`true` = 上下布局（顶部横排站点 chips），
-  /// `false` = 网格视图（左侧纵向站源栏）。对应原版顶栏第 4 个切换按钮，
-  /// 选择会持久化并跨会话保留（原版行为）。
-  bool get multiSearchStacked =>
-      Store.get<bool>('multiSearchStacked', true);
-
-  Future<void> setMultiSearchStacked(bool v) async {
-    await Store.set('multiSearchStacked', v);
     notifyListeners();
   }
 
