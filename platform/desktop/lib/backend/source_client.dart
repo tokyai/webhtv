@@ -8,6 +8,7 @@
 library;
 
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:http/http.dart' as http;
 
@@ -68,13 +69,54 @@ class SiteEntry {
 }
 
 /// 源服务客户端。
+///
+/// ## ⚠️ 必须绕开系统代理（实测踩坑）
+///
+/// `package:http` 的默认 `Client()`（即 `IOClient(HttpClient())`）在
+/// **Dart 的 `HttpClient` 会读取 `http_proxy` / `HTTP_PROXY` 环境变量**。
+/// 一旦用户机器（或 CI、企业网络、本机抓包工具）设了代理，发往
+/// `127.0.0.1:9988` 的请求就会被**送到代理服务器**，代理无法回源到本机
+/// 回环地址，直接返回 **HTTP 502 Bad Gateway**。
+///
+/// 表现极具迷惑性：
+///   * 直连 `curl` / Python `http.client`（都不读环境变量代理）→ 200，一切正常
+///   * App 内聚合搜索 → 93 个站源**全部** `SourceError(502): 源返回 HTTP 502`
+///   * 用户看到「聚合搜索没有搜索结果」，而源本身完全健康
+///
+/// 实测证据（Node 源在线，同一时刻同一个请求）：
+/// ```text
+/// http_proxy=http://127.0.0.1:53436
+/// DEFAULT Client  -> 502 len=94     ← 走了代理
+/// NO-PROXY Client -> 200 len=…      ← 直连成功
+/// ```
+///
+/// 修复：用 [HttpOverrides.runZoned] + `findProxy = 'DIRECT'` 强制直连，
+/// 仅在**创建这个客户端时**生效，不影响 App 其它需要走代理的外网请求。
 class SourceClient {
   final String baseUrl;
   final http.Client _http;
   static const _timeout = Duration(seconds: 30);
 
   SourceClient(this.baseUrl, {http.Client? client})
-      : _http = client ?? http.Client();
+      : _http = client ?? _directClient();
+
+  /// 构造一个**永不使用代理**的 `http.Client`。
+  ///
+  /// `HttpOverrides.runZoned` 只在该异步区域内生效，用来包住
+  /// `http.Client()` 的**创建**即可；客户端实例化完成后，内部持有的
+  /// `HttpClient` 已经带上了 `findProxy = DIRECT`，后续请求全部直连。
+  ///
+  /// ⚠️ 注意 **不能**在 `createHttpClient` 里直接 `HttpClient()` —— 那会
+  /// 再次进入 override，导致无限递归 → `Stack Overflow`（实测踩坑）。
+  /// 必须走 [HttpOverrides.createHttpClient] 的 `super` 实现拿到底层实例。
+  static http.Client _directClient() {
+    late http.Client c;
+    HttpOverrides.runZoned(
+      () => c = http.Client(),
+      createHttpClient: _DirectHttpOverrides().createHttpClient,
+    );
+    return c;
+  }
 
   void dispose() => _http.close();
 
@@ -235,9 +277,24 @@ class SourceClient {
 }
 
 String _s(Object? v) => v == null ? '' : '$v';
-
 int _i(Object? v) {
   if (v is int) return v;
   if (v is num) return v.toInt();
   return int.tryParse('$v') ?? 0;
 }
+
+/// 强制直连的 [HttpOverrides]（禁用一切代理环境变量）。
+///
+/// 见 [SourceClient] 文档字符串：`package:http` 的默认客户端会读取
+/// `http_proxy` / `HTTP_PROXY`，把发往 `127.0.0.1` 的请求也交给代理，
+/// 代理无法回源到本机回环地址 → 全部 502。
+class _DirectHttpOverrides extends HttpOverrides {
+  @override
+  HttpClient createHttpClient(SecurityContext? context) {
+    // super 拿到底层实例，再覆盖 findProxy；直接 `HttpClient()` 会无限递归。
+    final client = super.createHttpClient(context);
+    client.findProxy = (uri) => 'DIRECT';
+    return client;
+  }
+}
+
