@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../../core/debug_log.dart';
+import '../../core/netdisk_sources.dart';
 import '../../core/storage.dart';
 import '../../core/theme.dart';
 import '../../state/app_state.dart';
@@ -292,12 +293,15 @@ class _MultiSearchPageState extends State<MultiSearchPage> {
       // 和结果列表」。搜索过程中不剔除（否则侧栏会不断跳动、也看不出进度），
       // 结束后一次性收拢。这样侧栏的条目数 = 真正能用的源数，不再被
       // 「站名 0」刷屏。
+      var result = <Site>[
+        for (final s in ordered)
+          if ((_bySource[s.key] ?? const <Vod>[]).isNotEmpty) s,
+      ];
+      // 换源模式额外做一次「可播优先」重排（见 `_orderForAutoChange`）。
+      if (widget.autoChange) result = _orderForAutoChange(result);
       _order
         ..clear()
-        ..addAll([
-          for (final s in ordered)
-            if ((_bySource[s.key] ?? const <Vod>[]).isNotEmpty) s,
-        ]);
+        ..addAll(result);
       // `_focus` 指向的源可能已被剔除。
       if (_focus != null && !_order.any((s) => s.key == _focus)) {
         _focus = null;
@@ -323,6 +327,26 @@ class _MultiSearchPageState extends State<MultiSearchPage> {
         builder: (_) => DetailPage(site: site, vodId: vod.id, preview: vod),
       ),
     );
+  }
+
+  /// 换源模式下的站源排序：**把已知需要登录的网盘源沉底**。
+  ///
+  /// 为什么需要：原版实测的降级链是「4K 源要登录时自动换到秒播类源」
+  /// （花卷4K → 木偶4K → UC原画 → …）。而在换源模式里，用户是**带着
+  /// 「当前这条播不了」的诉求**进来的，最想要的是**下一个能直接播的源**。
+  /// 若把需登录的 4K 源排在前面，用户点进去还要再失败一次、再换一次。
+  ///
+  /// 判定用的是 [NetdiskSources.isNetdisk]（靠解出的 `providerId` 确认，
+  /// 而非站点名），所以**不会误伤**七味/立播/蜗牛这些同为「4K」的直链源。
+  /// 未识别过的源一律当作可播，排在前面 —— 宁可让它试一次，也不要
+  /// 因为「没数据」而被无谓降级。
+  List<Site> _orderForAutoChange(List<Site> sites) {
+    final netdisk = <Site>[];
+    final direct = <Site>[];
+    for (final s in sites) {
+      (NetdiskSources.isNetdisk(s.key) ? netdisk : direct).add(s);
+    }
+    return <Site>[...direct, ...netdisk];
   }
 
   @override
@@ -439,6 +463,8 @@ class _MultiSearchPageState extends State<MultiSearchPage> {
           _showBlockSheet(app);
         } else if (v == 'timeout') {
           _showTimeoutSheet(app);
+        } else if (v == 'view') {
+          _showViewModeSheet(app);
         } else if (v == 'auto') {
           Navigator.of(context).push(
             MaterialPageRoute(
@@ -453,6 +479,21 @@ class _MultiSearchPageState extends State<MultiSearchPage> {
           checked: app.searchOnlyDefaultSource,
           height: 40,
           child: Text('只搜首页选择的源', style: TextStyle(fontSize: 13)),
+        ),
+        PopupMenuItem(
+          value: 'view',
+          height: 40,
+          child: Row(
+            children: [
+              const Expanded(
+                  child: Text('视图模式', style: TextStyle(fontSize: 13))),
+              Text(
+                '${app.viewMode == ViewMode.grid ? '网格' : '列表'}'
+                ' / ${app.compactTitle ? '紧凑' : '标题'}',
+                style: TextStyle(fontSize: 12, color: PeekColors.primary),
+              ),
+            ],
+          ),
         ),
         PopupMenuItem(
           value: 'auto',
@@ -488,6 +529,140 @@ class _MultiSearchPageState extends State<MultiSearchPage> {
           ),
         ),
       ],
+    );
+  }
+
+  /// 视图模式弹层 —— 对齐原版搜索页左上角的「视图模式」面板：
+  /// 两组**互相独立**的单选：`网格 / 列表` 与 `紧凑 / 标题`。
+  ///
+  /// 这两个值本来就已经被 `PosterCard` 消费（`showTitle` / `compact`），
+  /// 也早就持久化在 Hive 里，只是**一直没有 UI 入口** —— 用户改不了。
+  Future<void> _showViewModeSheet(AppState app) async {
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: PeekColors.surfaceContainerHigh,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(14)),
+      ),
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (ctx, setSheet) {
+            return SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(20, 16, 20, 20),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('视图模式',
+                        style: TextStyle(
+                            fontSize: 14.5,
+                            fontWeight: FontWeight.w600,
+                            color: PeekColors.onSurface)),
+                    const SizedBox(height: 16),
+                    Text('排列',
+                        style:
+                            TextStyle(fontSize: 12, color: PeekColors.hint)),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        _viewChoice(
+                          icon: Icons.grid_view_rounded,
+                          label: '网格',
+                          active: app.viewMode == ViewMode.grid,
+                          onTap: () async {
+                            await app.setViewMode(ViewMode.grid);
+                            setSheet(() {});
+                          },
+                        ),
+                        const SizedBox(width: 10),
+                        _viewChoice(
+                          icon: Icons.view_list_rounded,
+                          label: '列表',
+                          active: app.viewMode == ViewMode.list,
+                          onTap: () async {
+                            await app.setViewMode(ViewMode.list);
+                            setSheet(() {});
+                          },
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 18),
+                    Text('标题',
+                        style:
+                            TextStyle(fontSize: 12, color: PeekColors.hint)),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        _viewChoice(
+                          icon: Icons.compress,
+                          label: '紧凑',
+                          active: app.compactTitle,
+                          onTap: () async {
+                            await app.setCompactTitle(true);
+                            setSheet(() {});
+                          },
+                        ),
+                        const SizedBox(width: 10),
+                        _viewChoice(
+                          icon: Icons.title,
+                          label: '标题',
+                          active: !app.compactTitle,
+                          onTap: () async {
+                            await app.setCompactTitle(false);
+                            setSheet(() {});
+                          },
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Widget _viewChoice({
+    required IconData icon,
+    required String label,
+    required bool active,
+    required VoidCallback onTap,
+  }) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(9),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 11),
+        decoration: BoxDecoration(
+          color: active
+              ? PeekColors.primaryContainer
+              : PeekColors.surfaceContainer,
+          borderRadius: BorderRadius.circular(9),
+          border: Border.all(
+            color: active ? PeekColors.primary : Colors.transparent,
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon,
+                size: 17,
+                color: active ? PeekColors.primary : PeekColors.onSurfaceVariant),
+            const SizedBox(width: 7),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: active ? FontWeight.w600 : FontWeight.w400,
+                color: active ? PeekColors.primary : PeekColors.onSurface,
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -729,7 +904,15 @@ class _MultiSearchPageState extends State<MultiSearchPage> {
   }
 
   /// 搜索历史面板（首次进入搜索页 / 换源模式初筛时展示）。
+  ///
+  /// 结构对齐原版搜索页首屏：
+  ///   * 上半：搜索历史 chips（可清空）
+  ///   * 下半：**热搜榜**（原版 30 条，带热度数字与封面）
+  ///
+  /// ⚠️ 热搜数据以前一直有（`AppState.loadHotWords`），但**全工程没有
+  /// 任何 UI 消费方** —— 数据在拉，界面上什么都看不到。这里补上渲染。
   Widget _historyPanel() {
+    final app = context.watch<AppState>();
     return ListView(
       padding: const EdgeInsets.fromLTRB(
           PeekColors.contentPadding, 28, PeekColors.contentPadding, 24),
@@ -761,14 +944,220 @@ class _MultiSearchPageState extends State<MultiSearchPage> {
           const SizedBox(height: 12),
           _historyChips(),
         ] else ...[
-          const SizedBox(height: 40),
-          Center(
-            child: Text('还没有搜索记录',
-                style: TextStyle(fontSize: 12.5, color: PeekColors.railIdle)),
-          ),
+          const SizedBox(height: 22),
+          Text('还没有搜索记录',
+              style: TextStyle(fontSize: 12.5, color: PeekColors.railIdle)),
         ],
+        const SizedBox(height: 30),
+        _hotSection(app),
       ],
     );
+  }
+
+  /// 热搜榜。
+  ///
+  /// 首次构建时触发拉取（`loadHotWords` 内部幂等，重复调用无副作用）。
+  /// 数据源是 B 站热搜；失败会退化到内置片单，所以一定有内容可渲染。
+  Widget _hotSection(AppState app) {
+    if (app.hotItems.isEmpty) {
+      if (!app.loadingHot) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) app.loadHotWords();
+        });
+      }
+      return Row(
+        children: [
+          Icon(Icons.local_fire_department_outlined,
+              size: 16, color: PeekColors.onSurfaceVariant),
+          const SizedBox(width: 6),
+          Text('热搜',
+              style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: PeekColors.onSurfaceVariant)),
+          const SizedBox(width: 10),
+          const SizedBox(
+            width: 12,
+            height: 12,
+            child: CircularProgressIndicator(strokeWidth: 1.6),
+          ),
+        ],
+      );
+    }
+
+    final items = app.hotItems;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Icon(Icons.local_fire_department,
+                size: 16, color: PeekColors.onSurfaceVariant),
+            const SizedBox(width: 6),
+            Text('热搜',
+                style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    color: PeekColors.onSurfaceVariant)),
+            const Spacer(),
+            Text('${items.length} 条',
+                style: TextStyle(fontSize: 11.5, color: PeekColors.railIdle)),
+          ],
+        ),
+        const SizedBox(height: 12),
+        _hotBody(items),
+      ],
+    );
+  }
+
+  /// 有封面 → 网格卡片（原版形态）；无封面 → 纯文字 chips。
+  ///
+  /// B 站热搜接口只稳定返回关键词，所以实际线上多半走 chips 分支；
+  /// 卡片分支保留给后续接入带封面的接口。
+  Widget _hotBody(List<HotWord> items) {
+    final withCover = items.where((e) => e.hasCover).length;
+    // 少于 1/3 有封面就不值得铺网格，直接上 chips 更紧凑。
+    if (withCover * 3 < items.length) return _hotChips(items);
+    return _hotGrid(items);
+  }
+
+  Widget _hotChips(List<HotWord> items) {
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: [
+        for (var i = 0; i < items.length; i++)
+          InkWell(
+            onTap: () => _doSearch(items[i].keyword),
+            borderRadius: BorderRadius.circular(16),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+              decoration: BoxDecoration(
+                color: PeekColors.surfaceContainerHigh,
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // 前三名标红 —— 对齐原版热榜的视觉权重。
+                  if (i < 3) ...[
+                    Icon(Icons.local_fire_department,
+                        size: 12,
+                        color: i == 0
+                            ? PeekColors.primary
+                            : PeekColors.onSurfaceVariant),
+                    const SizedBox(width: 4),
+                  ],
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 150),
+                    child: Text(
+                      items[i].keyword,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                          fontSize: 12.5, color: PeekColors.onSurface),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _hotGrid(List<HotWord> items) {
+    return LayoutBuilder(
+      builder: (context, c) {
+        // 卡片最小 108，按可用宽度决定列数（原版横屏是 5~6 列）。
+        final cols = (c.maxWidth / 118).floor().clamp(3, 8);
+        return GridView.builder(
+          shrinkWrap: true,
+          physics: const NeverScrollableScrollPhysics(),
+          itemCount: items.length,
+          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+            crossAxisCount: cols,
+            crossAxisSpacing: 10,
+            mainAxisSpacing: 12,
+            childAspectRatio: 0.62,
+          ),
+          itemBuilder: (_, i) {
+            final e = items[i];
+            return InkWell(
+              onTap: () => _doSearch(e.keyword),
+              borderRadius: BorderRadius.circular(8),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(8),
+                      child: Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          CachedNetworkImage(
+                            imageUrl: e.cover!,
+                            fit: BoxFit.cover,
+                            placeholder: (_, __) =>
+                                Container(color: PeekColors.surfaceContainerHigh),
+                            errorWidget: (_, __, ___) => Container(
+                              color: PeekColors.surfaceContainerHigh,
+                              child: Icon(Icons.movie_outlined,
+                                  size: 22, color: PeekColors.railIdle),
+                            ),
+                          ),
+                          if (i < 3)
+                            Positioned(
+                              left: 4,
+                              top: 4,
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 5, vertical: 1),
+                                decoration: BoxDecoration(
+                                  color: PeekColors.primary,
+                                  borderRadius: BorderRadius.circular(4),
+                                ),
+                                child: Text('${i + 1}',
+                                    style: const TextStyle(
+                                        fontSize: 10,
+                                        fontWeight: FontWeight.w700,
+                                        color: Colors.white)),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 5),
+                  Text(
+                    e.keyword,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(fontSize: 12, color: PeekColors.onSurface),
+                  ),
+                  if (e.score != null)
+                    Text(_fmtScore(e.score!),
+                        style: TextStyle(
+                            fontSize: 10.5, color: PeekColors.railIdle)),
+                ],
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  /// `51352` → `5.1万`；`1234` → `1,234`（对齐原版热度展示）。
+  static String _fmtScore(int n) {
+    if (n >= 10000) return '${(n / 10000).toStringAsFixed(1)}万';
+    final s = n.toString();
+    final b = StringBuffer();
+    for (var i = 0; i < s.length; i++) {
+      if (i > 0 && (s.length - i) % 3 == 0) b.write(',');
+      b.write(s[i]);
+    }
+    return b.toString();
   }
 
   Widget _historyHeader() {
@@ -933,8 +1322,15 @@ class _MultiSearchPageState extends State<MultiSearchPage> {
         else
           LayoutBuilder(
             builder: (context, c) {
-              // 竖屏窄屏：原版用「海报 + 标题 + 源角标 + 题材标签」的横排列表卡
-              if (c.maxWidth < 620) {
+              // 布局决策（**用户设置优先于自适应**）：
+              //   * `viewMode == list` → 横排列表卡（原版「列表」视图）
+              //   * `viewMode == grid` → 海报网格（原版「网格」视图）
+              //   * 窄屏时列表更合适，所以即便选了网格，也只在够宽时才铺开
+              //
+              // 注意：在此之前 `viewMode` 是**有值无效**的 —— 界面只按
+              // `maxWidth` 自适应，用户在设置里切了等于没切。
+              final forceList = app.viewMode == ViewMode.list;
+              if (forceList || c.maxWidth < 620) {
                 return Column(
                   children: [
                     for (final v in items)
