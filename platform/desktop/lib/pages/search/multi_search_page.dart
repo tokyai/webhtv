@@ -2,11 +2,11 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../../core/debug_log.dart';
 import '../../core/storage.dart';
 import '../../core/theme.dart';
 import '../../state/app_state.dart';
 import '../../tvbox/models.dart';
-import '../../widgets/common.dart';
 import '../../widgets/poster_card.dart';
 import '../detail/detail_page.dart';
 import '../setting/auto_change_source_page.dart';
@@ -64,17 +64,72 @@ class _MultiSearchPageState extends State<MultiSearchPage> {
 
   int _totalHits = 0;
 
+  /// 搜索历史（新→旧）。进入页面时从本地读，搜索成功后刷新。
+  ///
+  /// ⚠️ 历史以前**只写不读** —— `Store.addSearchHistory` 一直在正常落盘
+  /// （Hive `historyword.hive` 里能查到用户搜过的词），但没有任何 UI 组件
+  /// 读取 `Store.searchHistory`，所以用户进搜索页永远看不到历史记录。
+  List<String> _history = const [];
+
   @override
   void initState() {
     super.initState();
     _ctrl.text = widget.keyword;
+    // 输入框内容变化要触发重建，否则清空按钮（suffixIcon）不会出现/消失。
+    _ctrl.addListener(_onCtrlChanged);
+    _loadHistory();
     if (widget.keyword.trim().isNotEmpty) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _doSearch(widget.keyword));
     }
   }
 
+  void _onCtrlChanged() {
+    if (mounted) setState(() {});
+  }
+
+  void _loadHistory() {
+    final h = Store.searchHistory;
+    if (!mounted) return;
+    setState(() => _history = h);
+  }
+
+  /// 等源服务把站点清单拉回来。返回 true = 可用了。
+  ///
+  /// 为什么要等：见 [_doSearch] 里对「开 App 后立刻搜索」窗口期的说明。
+  /// 源服务是独立 node 进程，冷启动 + 拉 94 个站点清单通常 10~30 秒。
+  /// 这里最多等 45 秒，并且**在等待期间持续上报进度**，让用户看到界面在动，
+  /// 而不是停在一个看起来已经失败的「没有搜索到相关内容」上。
+  Future<bool> _waitForSources(AppState app) async {
+    const maxWait = Duration(seconds: 45);
+    const step = Duration(milliseconds: 400);
+    var waited = Duration.zero;
+    while (waited < maxWait) {
+      if (!mounted) return false;
+      if (app.searchSources(onlyDefault: app.searchOnlyDefaultSource).isNotEmpty) {
+        return true;
+      }
+      // 明确失败（拿到了错误）就别再等了。
+      if (!app.loadingConfig && !app.serviceReady && app.configError != null) {
+        DebugLog.add('SEARCH', '源服务启动失败：${app.configError}');
+        return false;
+      }
+      setState(() => _total = -1); // -1 表示「正在等待源服务」
+      await Future<void>.delayed(step);
+      waited += step;
+    }
+    DebugLog.add('SEARCH', '等待源服务超时（${maxWait.inSeconds}s）');
+    return false;
+  }
+
+  Future<void> _clearHistory() async {
+    await Store.clearSearchHistory();
+    if (!mounted) return;
+    setState(() => _history = const []);
+  }
+
   @override
   void dispose() {
+    _ctrl.removeListener(_onCtrlChanged);
     _ctrl.dispose();
     _scroll.dispose();
     super.dispose();
@@ -82,48 +137,152 @@ class _MultiSearchPageState extends State<MultiSearchPage> {
 
   Future<void> _doSearch(String kw) async {
     final keyword = kw.trim();
-    if (keyword.isEmpty) return;
-    if (_searching) return;
+    // 空关键词：以前是静默 return，用户点了「搜索」却什么都没发生，
+    // 很容易被当成「点击无效 / 搜不到」。现在给一句明确提示。
+    if (keyword.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('请输入关键词'),
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+      return;
+    }
+    // 搜索进行中重复点击：以前也是静默 return。改成提示，否则用户会以为
+    // 按钮坏了（93 源并发 + 慢源，一轮最长要 20 秒）。
+    if (_searching) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('正在搜索中 $_done/$_total，请稍候…'),
+            duration: const Duration(seconds: 2),
+          ),
+        );
+      }
+      return;
+    }
     _ctrl.text = keyword;
     FocusScope.of(context).unfocus();
-    if (!widget.autoChange) await Store.addSearchHistory(keyword);
+    DebugLog.add('SEARCH', '--- 开始搜索「$keyword」---');
+    if (!widget.autoChange) {
+      await Store.addSearchHistory(keyword);
+      _loadHistory();
+    }
     if (!mounted) return;
 
     final app = context.read<AppState>();
+
+    // ⚠️⚠️ 真因修复：等待源服务就绪。
+    //
+    // `AppState.init()` 里是 `unawaited(_startActive(silent: true))` —— 源服务
+    // （独立 node 子进程 + 拉 94 个站点清单）**不阻塞启动**，要跑十几到几十秒。
+    // 在这个窗口期内 `_svc.sites` 还是空数组，于是：
+    //     searchSources() → 空列表
+    //     → searchBySource 一个源都没发
+    //     → _totalHits 恒为 0
+    //     → 界面显示「没有搜索到相关内容」
+    // 这正是用户反馈的「搜不到东西，如凡人修仙传」：**开 App 后马上搜索**
+    // 就会命中这个窗口，而数据层其实一切正常（实测同关键词 47 源 887 条）。
+    //
+    // 处理：若此刻没有可用源而源仍在加载，先等它；等待期间给出进度提示。
+    if (app.searchSources(onlyDefault: app.searchOnlyDefaultSource).isEmpty &&
+        !app.serviceReady) {
+      DebugLog.add('SEARCH', '源服务尚未就绪，等待中…');
+      setState(() {
+        _searching = true;
+        _searched = true;
+        _done = 0;
+        _total = 0;
+        _totalHits = 0;
+        _order.clear();
+        _bySource.clear();
+        _focus = null;
+      });
+      final ok = await _waitForSources(app);
+      if (!mounted) return;
+      if (!ok) {
+        setState(() => _searching = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('源服务启动失败或超时，请到「设置 → 运行状态」查看'),
+            duration: Duration(seconds: 4),
+          ),
+        );
+        return;
+      }
+      DebugLog.add('SEARCH', '源服务已就绪，开始搜索');
+    }
+
     // 站点原序：并发回调的到达顺序是「谁先返回谁先到」，直接 `_order.add`
     // 会让侧栏顺序每次搜索都不一样（实测完成时间从 0.6s 到 20s 跨度极大）。
     // 这里先取一份权威顺序，回调里只写 `_bySource`，结束后按原序重建 `_order`。
     final ordered = app.searchSources(onlyDefault: app.searchOnlyDefaultSource);
+    DebugLog.add('SEARCH', '参与搜索的源 ${ordered.length} 个');
+    if (ordered.isEmpty) {
+      // 源清单为空（源服务未就绪 / 全被屏蔽）—— 直接给出可执行的原因，
+      // 而不是让界面停在「没有搜索到相关内容」上误导用户。
+      setState(() {
+        _searching = false;
+        _searched = true;
+        _done = 0;
+        _total = 0;
+        _totalHits = 0;
+        _order.clear();
+        _bySource.clear();
+        _focus = null;
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('没有可用的搜索源，请检查源是否已加载'),
+            duration: Duration(seconds: 3),
+          ),
+        );
+      }
+      return;
+    }
     final pending = <String, Site>{for (final s in ordered) s.key: s};
 
     setState(() {
       _searching = true;
       _searched = true;
       _done = 0;
-      _total = 0;
+      // 一开始就把 total 设为真实源数，避免界面显示「正在聚合搜索 0/0」
+      // 被误读为「没有任何源 / 卡住了」。
+      _total = ordered.length;
       _totalHits = 0;
       _order.clear();
       _bySource.clear();
       _focus = null;
     });
 
-    await app.searchBySource(
-      keyword,
-      onlyDefault: app.searchOnlyDefaultSource,
-      onResult: (site, items, done, total) {
-        if (!mounted) return;
-        setState(() {
-          // 搜索过程中：有结果的源**实时上屏**，让用户尽快看到东西。
-          _bySource[site.key] = items;
-          if (items.isNotEmpty) {
-            if (!_order.any((s) => s.key == site.key)) _order.add(site);
-            _totalHits += items.length;
-          }
-          _done = done;
-          _total = total;
-        });
-      },
-    );
+    try {
+      await app.searchBySource(
+        keyword,
+        onlyDefault: app.searchOnlyDefaultSource,
+        onResult: (site, items, done, total) {
+          if (!mounted) return;
+          DebugLog.add('SEARCH', '${site.name} -> ${items.length} 条 ($done/$total)');
+          setState(() {
+            // 搜索过程中：有结果的源**实时上屏**，让用户尽快看到东西。
+            _bySource[site.key] = items;
+            if (items.isNotEmpty) {
+              if (!_order.any((s) => s.key == site.key)) _order.add(site);
+              _totalHits += items.length;
+            }
+            _done = done;
+            _total = total;
+          });
+        },
+      );
+    } catch (e, st) {
+      // 以前这里没有 try/catch：一旦抛出，`_searching` 永远停在 true，
+      // 界面就永久卡在「正在聚合搜索…」，用户看到的就是「搜不到东西」。
+      DebugLog.add('SEARCH', '搜索整体失败：$e');
+      debugPrint('searchBySource failed: $e\n$st');
+    }
     if (!mounted) return;
     setState(() {
       _searching = false;
@@ -487,6 +646,7 @@ class _MultiSearchPageState extends State<MultiSearchPage> {
 
   Widget _body() {
     if (_searching && _totalHits == 0) {
+      final waiting = _total < 0;
       return Center(
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -497,19 +657,31 @@ class _MultiSearchPageState extends State<MultiSearchPage> {
               child: CircularProgressIndicator(strokeWidth: 2.4),
             ),
             SizedBox(height: 14),
-            Text('正在聚合搜索 $_done/$_total 个站源…',
-                style: TextStyle(fontSize: 13, color: PeekColors.hint)),
+            Text(
+              // `_total == -1`：源服务还在冷启动，一个源都还没有。
+              // 这时如果仍显示「0/0 个站源」，用户会以为搜索坏了。
+              waiting
+                  ? '正在启动源服务…'
+                  : (_total > 0
+                      ? '正在聚合搜索 $_done/$_total 个站源…'
+                      : '正在准备搜索…'),
+              style: TextStyle(fontSize: 13, color: PeekColors.hint),
+            ),
+            if (waiting) ...[
+              const SizedBox(height: 8),
+              Text('首次启动需要加载站源清单，请稍候',
+                  style: TextStyle(fontSize: 11.5, color: PeekColors.railIdle)),
+            ],
           ],
         ),
       );
     }
     if (!_searched) {
-      return PeekEmpty(
-        icon: Icons.travel_explore_outlined,
-        text: widget.autoChange
-            ? '输入片名后搜索，点结果即可换到该源播放'
-            : '输入关键词开始多元搜索',
-      );
+      // 首次进入（未搜索过）：展示**搜索历史**。
+      //
+      // 用户报告「搜索栏进去没有搜索历史」——根因是 `Store.searchHistory`
+      // 只被写、从来没被读过。历史数据其实一直在 `historyword.hive` 里。
+      return _historyPanel();
     }
     if (_totalHits == 0 && !_searching) {
       // ⚠️ 这里以前用 `_order.length` 报「已搜索 N 个站源」。现在 `_order`
@@ -517,12 +689,143 @@ class _MultiSearchPageState extends State<MultiSearchPage> {
       // 「已搜索 0 个站源」，与实际搜了几十个源完全不符。改用 `_total`
       // （本轮参与搜索的源总数），才是用户想知道的数字。
       final scanned = _total > 0 ? _total : _order.length;
-      return PeekEmpty(
-        icon: Icons.search_off_outlined,
-        text: '没有搜索到「${_ctrl.text}」相关内容\n已搜索 $scanned 个站源',
-      );
+      return _noResultPanel(scanned);
     }
     return _groupedList();
+  }
+
+  /// 无结果面板：给出「已搜索 N 个源」的明确数字，并**回退到搜索历史**，
+  /// 让用户能一键换个词重试（而不是面对一个死胡同）。
+  Widget _noResultPanel(int scanned) {
+    final kw = _ctrl.text.trim();
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(
+          PeekColors.contentPadding, 40, PeekColors.contentPadding, 24),
+      children: [
+        Icon(Icons.search_off_outlined, size: 46, color: PeekColors.hint),
+        const SizedBox(height: 14),
+        Text(
+          '没有搜索到「$kw」相关内容',
+          textAlign: TextAlign.center,
+          style: TextStyle(
+              fontSize: 14.5,
+              fontWeight: FontWeight.w600,
+              color: PeekColors.onSurface),
+        ),
+        const SizedBox(height: 6),
+        Text(
+          '已搜索 $scanned 个站源，均未返回结果\n可换个关键词，或调大「单源搜索超时」再试',
+          textAlign: TextAlign.center,
+          style: TextStyle(fontSize: 12, color: PeekColors.hint, height: 1.6),
+        ),
+        if (_history.isNotEmpty) ...[
+          const SizedBox(height: 28),
+          _historyHeader(),
+          const SizedBox(height: 10),
+          _historyChips(),
+        ],
+      ],
+    );
+  }
+
+  /// 搜索历史面板（首次进入搜索页 / 换源模式初筛时展示）。
+  Widget _historyPanel() {
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(
+          PeekColors.contentPadding, 28, PeekColors.contentPadding, 24),
+      children: [
+        Row(
+          children: [
+            Icon(Icons.travel_explore_outlined,
+                size: 20, color: PeekColors.primary),
+            const SizedBox(width: 8),
+            Text(
+              widget.autoChange ? '换源搜索' : '多元搜索',
+              style: TextStyle(
+                  fontSize: 15,
+                  fontWeight: FontWeight.w600,
+                  color: PeekColors.onSurface),
+            ),
+          ],
+        ),
+        const SizedBox(height: 6),
+        Text(
+          widget.autoChange
+              ? '输入片名后搜索，点结果即可换到该源播放'
+              : '一次搜索全部站源，按源分组展示结果',
+          style: TextStyle(fontSize: 12.5, color: PeekColors.hint),
+        ),
+        if (_history.isNotEmpty) ...[
+          const SizedBox(height: 26),
+          _historyHeader(),
+          const SizedBox(height: 12),
+          _historyChips(),
+        ] else ...[
+          const SizedBox(height: 40),
+          Center(
+            child: Text('还没有搜索记录',
+                style: TextStyle(fontSize: 12.5, color: PeekColors.railIdle)),
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _historyHeader() {
+    return Row(
+      children: [
+        Icon(Icons.history, size: 16, color: PeekColors.onSurfaceVariant),
+        const SizedBox(width: 6),
+        Text('搜索历史',
+            style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+                color: PeekColors.onSurfaceVariant)),
+        const Spacer(),
+        InkWell(
+          onTap: _clearHistory,
+          borderRadius: BorderRadius.circular(6),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+            child: Row(
+              children: [
+                Icon(Icons.delete_outline, size: 14, color: PeekColors.hint),
+                const SizedBox(width: 3),
+                Text('清空',
+                    style: TextStyle(fontSize: 12, color: PeekColors.hint)),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _historyChips() {
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: [
+        for (final kw in _history)
+          InkWell(
+            onTap: () => _doSearch(kw),
+            borderRadius: BorderRadius.circular(16),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 7),
+              decoration: BoxDecoration(
+                color: PeekColors.surfaceContainerHigh,
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: Text(
+                kw,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 12.5, color: PeekColors.onSurface),
+              ),
+            ),
+          ),
+      ],
+    );
   }
 
   /// 按源分组渲染（原版核心观感：分源显示搜索结果）
