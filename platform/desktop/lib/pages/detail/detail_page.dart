@@ -28,11 +28,24 @@ class DetailPage extends StatefulWidget {
   final String vodId;
   final Vod? preview;
 
+  /// 叠加层模式：作为播放页侧边栏使用。
+  ///
+  /// 原版的详情页并不是独立页面，而是**播放器之上的一层侧边面板**：
+  /// 播放器占主区，详情固定贴在一侧，关闭面板播放不中断。置为 `true` 时
+  /// 本页不再渲染自己的顶栏与背景，只输出可嵌入的内容区，由宿主
+  /// （[PlayerPage]）提供容器与关闭按钮。
+  final bool embedded;
+
+  /// 叠加层里点某一集时的回调；为空则走默认导航（push 播放页）。
+  final void Function(Vod vod, int lineIndex, int episodeIndex)? onPickEpisode;
+
   const DetailPage({
     super.key,
     required this.site,
     required this.vodId,
     this.preview,
+    this.embedded = false,
+    this.onPickEpisode,
   });
 
   @override
@@ -149,6 +162,11 @@ class _DetailPageState extends State<DetailPage> {
       peekToast(context, '该影片没有可播放的线路');
       return;
     }
+    // 叠加层模式：交给宿主（播放页）在同一处播放器里切集，不新开页面
+    if (widget.embedded) {
+      widget.onPickEpisode?.call(vod, _lineIndex, episodeIndex);
+      return;
+    }
     final merged = context.read<AppState>().mergePlaylist;
     Navigator.of(context).push(
       MaterialPageRoute(
@@ -178,27 +196,89 @@ class _DetailPageState extends State<DetailPage> {
     final vod = _vod;
     final fav = app.isFavorite(widget.site, widget.vodId);
 
+    final body = Column(
+      children: [
+        if (widget.embedded)
+          _panelHeader(vod?.name ?? '详情', fav)
+        else
+          _header(vod?.name ?? '详情', fav),
+        Expanded(
+          child: _loading && vod == null
+              ? const PeekLoading(text: '正在获取影片详情…')
+              : _error != null && vod == null
+                  ? PeekEmpty(
+                      icon: Icons.error_outline,
+                      text: '详情加载失败\n$_error',
+                      actionText: '重试',
+                      onAction: _load,
+                    )
+                  : _content(vod!, app),
+        ),
+        if (_showDownloadTip && vod != null) _downloadTip(),
+      ],
+    );
+
+    // 叠加层模式：不套自己的 Scaffold / SafeArea，由播放页提供容器
+    if (widget.embedded) {
+      return Material(
+        color: Colors.transparent,
+        child: body,
+      );
+    }
+
     return Scaffold(
       backgroundColor: PeekColors.surface,
-      body: SafeArea(
-        child: Column(
-          children: [
-            _header(vod?.name ?? '详情', fav),
-            Expanded(
-              child: _loading && vod == null
-                  ? const PeekLoading(text: '正在获取影片详情…')
-                  : _error != null && vod == null
-                      ? PeekEmpty(
-                          icon: Icons.error_outline,
-                          text: '详情加载失败\n$_error',
-                          actionText: '重试',
-                          onAction: _load,
-                        )
-                      : _content(vod!, app),
+      body: SafeArea(child: body),
+    );
+  }
+
+  /// 叠加层模式下的紧凑头：返回 / 片名 / 收藏 / 返回主页。
+  /// 对应原版侧边面板顶部那一行。
+  Widget _panelHeader(String title, bool fav) {
+    return SizedBox(
+      height: 52,
+      child: Row(
+        children: [
+          IconButton(
+            tooltip: '返回',
+            onPressed: () => Navigator.of(context).maybePop(),
+            icon: const Icon(Icons.arrow_back, size: 19),
+          ),
+          Expanded(
+            child: Text(
+              title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                  fontSize: 14.5,
+                  fontWeight: FontWeight.w600,
+                  color: PeekColors.onSurface),
             ),
-            if (_showDownloadTip && vod != null) _downloadTip(),
-          ],
-        ),
+          ),
+          IconButton(
+            tooltip: fav ? '取消收藏' : '收藏',
+            onPressed: () async {
+              final vod = _vod;
+              if (vod == null) return;
+              await context.read<AppState>().toggleFavorite(widget.site, vod);
+              if (mounted) {
+                peekToast(context, fav ? '已取消收藏' : '已加入收藏');
+              }
+            },
+            icon: Icon(
+              fav ? Icons.favorite : Icons.favorite_border,
+              size: 19,
+              color: fav ? PeekColors.primary : PeekColors.onSurface,
+            ),
+          ),
+          IconButton(
+            tooltip: '返回主页',
+            onPressed: () =>
+                Navigator.of(context).popUntil((r) => r.isFirst),
+            icon: const Icon(Icons.home_outlined, size: 19),
+          ),
+          const SizedBox(width: 4),
+        ],
       ),
     );
   }

@@ -19,6 +19,7 @@ import '../../tvbox/backend_bridge.dart';
 import '../../tvbox/models.dart';
 import '../../tvbox/playlist_merge.dart';
 import '../../tvbox/spider.dart';
+import '../detail/detail_page.dart';
 import '../search/multi_search_page.dart';
 import '../../player/danmaku/danmaku_controller.dart';
 import '../../player/danmaku/danmaku_item.dart';
@@ -103,6 +104,9 @@ class _PlayerPageState extends State<PlayerPage> {
   // ---------------- 手势进度条 ----------------
   Duration _dragTarget = Duration.zero;
   bool _dragging = false;
+
+  /// 详情叠加面板是否展开（原版侧边面板开关）
+  bool _panelOpen = false;
 
   /// 点按定位：暂停状态点左/右半屏后退/前进 10 秒，
   /// 播放中点按只切控件显隐（与原版一致）。
@@ -599,8 +603,43 @@ class _PlayerPageState extends State<PlayerPage> {
               ),
               // 锁定后仅保留一个解锁按钮，其他交互全部屏蔽
               if (_locked) _unlockButton(),
+              // 详情叠加面板（原版行为）：覆盖在播放器之上，
+              // 关闭面板**不会中断播放**。
+              if (_panelOpen && !_locked) _detailOverlay(context),
             ],
           ),
+        ),
+      ),
+    );
+  }
+
+  /// 详情叠加面板。
+  ///
+  /// 原版：播放器占主区，详情固定贴在**右侧**（横屏）或**底部**（竖屏），
+  /// 是浮层而非独立页面。这里横竖屏统一用右侧面板，宽度按屏幕比例自适应，
+  /// 窄屏（竖屏）时铺满并可下滑关闭。
+  Widget _detailOverlay(BuildContext context) {
+    final size = MediaQuery.of(context).size;
+    final portrait = size.height > size.width;
+    final width = portrait ? size.width : (size.width * 0.364).clamp(300.0, 520.0);
+    return Positioned(
+      top: 0,
+      right: 0,
+      bottom: 0,
+      width: width,
+      child: Material(
+        color: PeekColors.surface,
+        elevation: 12,
+        child: DetailPage(
+          site: widget.site,
+          vodId: widget.vod.id,
+          preview: widget.vod,
+          embedded: true,
+          onPickEpisode: (vod, line, ep) {
+            // 同一播放器内切集，不新开页面
+            setState(() => _panelOpen = false);
+            _playEpisode(ep);
+          },
         ),
       ),
     );
@@ -988,6 +1027,15 @@ class _PlayerPageState extends State<PlayerPage> {
                   icon: Icon(_skipTailEnabled
                       ? Icons.skip_next
                       : Icons.skip_next_outlined),
+                ),
+                IconButton(
+                  color: Colors.white,
+                  iconSize: 20,
+                  tooltip: _panelOpen ? '关闭详情' : '详情 / 选集',
+                  onPressed: () => setState(() => _panelOpen = !_panelOpen),
+                  icon: Icon(_panelOpen
+                      ? Icons.view_sidebar
+                      : Icons.view_sidebar_outlined),
                 ),
                 IconButton(
                   color: Colors.white,
