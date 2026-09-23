@@ -10,6 +10,7 @@ import '../../widgets/poster_card.dart';
 import '../detail/detail_page.dart';
 import '../favorite_page.dart';
 import '../history_page.dart';
+import '../search/multi_search_page.dart';
 import '../search/search_page.dart';
 import 'source_picker.dart';
 
@@ -195,6 +196,23 @@ class HomePageState extends State<HomePage> {
   void _openVod(Vod vod) {
     final site = _app.currentSite;
     if (site == null) return;
+    // 原版行为：首页内容来自豆瓣等聚合站点时，这些站点本身不提供播放源
+    // （`vod.lines` 为空）。此时点剧集直接进入聚合搜索结果页，让用户从
+    // 其它站源里挑一个能播的，而不是先跳到一个「暂无播放源」的详情页。
+    final hasPlayable = vod.lines.any((l) => l.episodes.isNotEmpty);
+    if (!hasPlayable) {
+      Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => MultiSearchPage(
+            keyword: vod.name,
+            autoChange: true,
+            originName: vod.name,
+            originSite: site.name,
+          ),
+        ),
+      );
+      return;
+    }
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => DetailPage(site: site, vodId: vod.id, preview: vod),
