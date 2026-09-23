@@ -7,6 +7,7 @@ import 'package:hive_flutter/hive_flutter.dart';
 import 'package:path_provider/path_provider.dart';
 
 import '../../core/debug_log.dart';
+import '../../core/netdisk_sources.dart';
 import '../../core/storage.dart';
 import '../../core/theme.dart';
 import '../../core/utils.dart';
@@ -766,6 +767,7 @@ class _EnhanceSettingsPageState extends State<EnhanceSettingsPage> {
   bool _compactEpisode = Store.get<bool>('compact_episode_title', false);
   bool _cspWarmup = Store.get<bool>('csp_warmup', true);
   bool _debugLog = Store.get<bool>('debugLogEnabled', false);
+  bool _showAllSites = Store.get<bool>('showAllSites', true);
 
   @override
   Widget build(BuildContext context) {
@@ -779,6 +781,28 @@ class _EnhanceSettingsPageState extends State<EnhanceSettingsPage> {
               child: ListView(
                 padding: const EdgeInsets.only(bottom: 24),
                 children: [
+                  PeekTile(
+                    icon: Icons.dns_outlined,
+                    title: '全部站点显示',
+                    // 关闭后会屏蔽「需要登录的网盘源」（4K 分享类）。
+                    // 判定依据是播放地址的结构（base64 JSON 里的 providerId），
+                    // 不是站点名 —— 详见 NetdiskSources 的注释。
+                    subtitle: _showAllSites
+                        ? '关闭后不显示需要登录的网盘源（4K 分享类）'
+                        : '已屏蔽 ${NetdiskSources.known.length} 个需登录网盘源',
+                    trailing: Switch(
+                      value: _showAllSites,
+                      onChanged: (v) async {
+                        setState(() => _showAllSites = v);
+                        await Store.set('showAllSites', v);
+                      },
+                    ),
+                    onTap: () async {
+                      final v = !_showAllSites;
+                      setState(() => _showAllSites = v);
+                      await Store.set('showAllSites', v);
+                    },
+                  ),
                   PeekTile(
                     icon: Icons.sort_outlined,
                     title: '站源健康排序',

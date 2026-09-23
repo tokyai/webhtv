@@ -39,6 +39,7 @@ import 'package:path_provider/path_provider.dart';
 
 import '../backend/source_client.dart';
 import '../core/debug_log.dart';
+import '../core/netdisk_sources.dart';
 import '../backend/source_config.dart';
 import '../backend/source_fetcher.dart';
 import '../backend/source_runtime.dart';
@@ -526,7 +527,22 @@ class SourceService {
     if (api == null) throw SpiderException('源服务未就绪');
     try {
       final d = await api.detail(_entryRaw(site), id);
-      return d == null ? null : vodFromDetail(d);
+      if (d == null) return null;
+      final vod = vodFromDetail(d);
+      // 顺手判定这个源是不是「网盘分享源」（夸克/百度/UC/迅雷/115）。
+      //
+      // 判定信息**只在这里拿得到** —— 搜索结果不带 `vod_play_url`，
+      // 只有 detail 才有。所以判定天然是**渐进**的：某个网盘源第一次被
+      // 打开时标记下来并持久化，之后「全部站点显示」关闭时就能提前排除它。
+      // 详见 [NetdiskSources] 里对「为什么不按站点名过滤」的说明。
+      if (vod != null) {
+        final prov = NetdiskSources.detectFromPlayUrl(vod.playUrl);
+        if (prov != null && !NetdiskSources.isNetdisk(site.key)) {
+          await NetdiskSources.mark(site.key);
+          DebugLog.add('NETDISK', '${site.name} -> $prov（已标记为需登录）');
+        }
+      }
+      return vod;
     } catch (e) {
       throw _toSpiderError(e);
     }
