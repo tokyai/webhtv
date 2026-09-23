@@ -144,6 +144,9 @@ class AdaptiveNav extends StatelessWidget {
   /// 切换断点（dp）。小于此宽度用底栏。
   final double breakpoint;
 
+  /// 侧栏样式（原版「导航栏设置」6 选 1）。
+  final NavStyle navStyle;
+
   const AdaptiveNav({
     super.key,
     required this.items,
@@ -151,6 +154,7 @@ class AdaptiveNav extends StatelessWidget {
     required this.onChanged,
     required this.builder,
     this.breakpoint = 600,
+    this.navStyle = NavStyle.classic,
   });
 
   @override
@@ -162,7 +166,12 @@ class AdaptiveNav extends StatelessWidget {
         if (wide) {
           return Row(
             children: [
-              NavRail(items: items, index: index, onChanged: onChanged),
+              NavRail(
+                items: items,
+                index: index,
+                onChanged: onChanged,
+                style: navStyle,
+              ),
               Expanded(child: builder(context, true)),
             ],
           );

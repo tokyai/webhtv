@@ -42,6 +42,40 @@ const kNavItems = <NavItem>[
   NavItem('setting', Icons.settings_outlined, Icons.settings_rounded, '设置'),
 ];
 
+/// 导航栏样式（原版「导航栏设置」里的 6 种）。
+///
+/// 原版文案：横屏模式下显示侧边导航栏，竖屏模式下显示底部导航栏；
+/// 样式对两种形态同时生效。
+enum NavStyle {
+  /// 经典风格：选中项整块填充
+  classic('经典风格'),
+
+  /// 指示条：仅左侧一条竖指示条
+  indicator('指示条'),
+
+  /// 紧凑图标：不显示文字
+  compact('紧凑图标'),
+
+  /// 胶囊高亮：选中项用圆角胶囊
+  pill('胶囊高亮'),
+
+  /// 底部指示：选中项下方一条横线
+  underline('底部指示'),
+
+  /// 可隐藏：滚动时自动收起
+  hideable('可隐藏');
+
+  final String label;
+  const NavStyle(this.label);
+
+  static NavStyle fromName(String? n) {
+    for (final s in NavStyle.values) {
+      if (s.name == n) return s;
+    }
+    return NavStyle.classic;
+  }
+}
+
 /// 左侧竖向导航栏。
 ///
 /// 几何参数来自原版 1.2.5+2 **实机像素复测**（1920x1080 @280dpi = 1.75）：
@@ -58,11 +92,15 @@ class NavRail extends StatelessWidget {
   final int index;
   final ValueChanged<int> onChanged;
 
+  /// 导航栏样式（原版 6 选 1）
+  final NavStyle style;
+
   const NavRail({
     super.key,
     required this.items,
     required this.index,
     required this.onChanged,
+    this.style = NavStyle.classic,
   });
 
   @override
@@ -84,6 +122,7 @@ class NavRail extends StatelessWidget {
             _RailItem(
               item: items[i],
               selected: i == index,
+              style: style,
               onTap: () => onChanged(i),
             ),
         ],
@@ -122,52 +161,178 @@ class _RailLogo extends StatelessWidget {
 class _RailItem extends StatelessWidget {
   final NavItem item;
   final bool selected;
+  final NavStyle style;
   final VoidCallback onTap;
 
   const _RailItem({
     required this.item,
     required this.selected,
+    required this.style,
     required this.onTap,
   });
 
   @override
   Widget build(BuildContext context) {
     final color = selected ? PeekColors.primary : PeekColors.railIdle;
+
+    // 紧凑图标：不显示文字，槽位压扁
+    if (style == NavStyle.compact) {
+      return SizedBox(
+        height: 44,
+        child: Center(
+          child: InkWell(
+            onTap: onTap,
+            borderRadius: BorderRadius.circular(12),
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 150),
+              width: 40,
+              height: 36,
+              decoration: BoxDecoration(
+                color: selected
+                    ? PeekColors.railSelected
+                    : Colors.transparent,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Icon(selected ? item.activeIcon : item.icon,
+                  size: 20, color: color),
+            ),
+          ),
+        ),
+      );
+    }
+
+    // 指示条：选中项左侧一条竖条
+    if (style == NavStyle.indicator) {
+      return _slot(
+        child: Row(
+          children: [
+            AnimatedContainer(
+              duration: const Duration(milliseconds: 150),
+              width: 3,
+              height: selected ? 26 : 0,
+              decoration: BoxDecoration(
+                color: PeekColors.primary,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            Expanded(child: _label(color, showText: true)),
+          ],
+        ),
+      );
+    }
+
+    // 底部指示：选中项下方一条横线
+    if (style == NavStyle.underline) {
+      return _slot(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            _label(color, showText: true),
+            const SizedBox(height: 3),
+            AnimatedContainer(
+              duration: const Duration(milliseconds: 150),
+              width: selected ? 22 : 0,
+              height: 2,
+              decoration: BoxDecoration(
+                color: PeekColors.primary,
+                borderRadius: BorderRadius.circular(1),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    // 胶囊高亮 / 可隐藏：都用圆角胶囊，可隐藏额外用更窄的胶囊
+    final pill = style == NavStyle.pill || style == NavStyle.hideable;
+    return SizedBox(
+      height: PeekColors.railItemHeight,
+      child: Center(
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(pill ? 18 : 14),
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 150),
+            width: pill ? PeekColors.railChipWidth : PeekColors.railChipWidth,
+            height: pill ? 44 : PeekColors.railChipHeight,
+            decoration: BoxDecoration(
+              color: selected ? PeekColors.railSelected : Colors.transparent,
+              borderRadius: BorderRadius.circular(pill ? 18 : 14),
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(selected ? item.activeIcon : item.icon,
+                    size: 19, color: color),
+                if (pill) ...[
+                  const SizedBox(width: 7),
+                  Text(
+                    item.label,
+                    style: TextStyle(
+                      fontSize: 12.5,
+                      color: selected
+                          ? PeekColors.onPrimaryContainer
+                          : color,
+                      fontWeight:
+                          selected ? FontWeight.w500 : FontWeight.w400,
+                    ),
+                  ),
+                ] else ...[
+                  const SizedBox(width: 4),
+                  Text(
+                    item.label,
+                    style: TextStyle(
+                      fontSize: 12,
+                      height: 1.1,
+                      color: selected
+                          ? PeekColors.onPrimaryContainer
+                          : color,
+                      fontWeight:
+                          selected ? FontWeight.w500 : FontWeight.w400,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 经典风格/指示条/底部指示共用的「图标 + 文字」竖排单元
+  Widget _slot({required Widget child}) {
     return SizedBox(
       height: PeekColors.railItemHeight,
       child: Center(
         child: InkWell(
           onTap: onTap,
           borderRadius: BorderRadius.circular(14),
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 150),
-            width: PeekColors.railChipWidth,
-            height: PeekColors.railChipHeight,
-            decoration: BoxDecoration(
-              color: selected ? PeekColors.railSelected : Colors.transparent,
-              borderRadius: BorderRadius.circular(14),
-            ),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                // 图标 33px = 18.9dp、文字墨高 ~22px（原版像素复测）
-                Icon(selected ? item.activeIcon : item.icon,
-                    size: 19, color: color),
-                const SizedBox(height: 4),
-                Text(
-                  item.label,
-                  style: TextStyle(
-                    fontSize: 12,
-                    height: 1.1,
-                    color: selected ? PeekColors.onPrimaryContainer : color,
-                    fontWeight: selected ? FontWeight.w500 : FontWeight.w400,
-                  ),
-                ),
-              ],
-            ),
-          ),
+          child: child,
         ),
       ),
+    );
+  }
+
+  Widget _label(Color color, {required bool showText}) {
+    return Column(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        Icon(selected ? item.activeIcon : item.icon,
+            size: 19, color: color),
+        if (showText) ...[
+          const SizedBox(height: 4),
+          Text(
+            item.label,
+            style: TextStyle(
+              fontSize: 12,
+              height: 1.1,
+              color: selected ? PeekColors.onPrimaryContainer : color,
+              fontWeight: selected ? FontWeight.w500 : FontWeight.w400,
+            ),
+          ),
+        ],
+      ],
     );
   }
 }

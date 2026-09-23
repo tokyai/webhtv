@@ -4,6 +4,7 @@ import '../../core/storage.dart';
 import '../../core/theme.dart';
 import '../../core/utils.dart';
 import '../../widgets/common.dart';
+import '../../widgets/nav_rail.dart';
 
 /// 外观与语言（WebHTV 安卓版设置页第 7 项，副标题「4 项」）。
 ///
@@ -258,7 +259,6 @@ class _AppearancePageState extends State<AppearancePage> {
                     icon: Icons.language,
                     title: '语言',
                     subtitle: _languages[_language],
-                    showDivider: false,
                     onTap: () => _pick(
                       title: '语言',
                       options: _languages,
@@ -269,6 +269,24 @@ class _AppearancePageState extends State<AppearancePage> {
                       },
                     ),
                   ),
+                  // 导航栏设置（原版「外观与个性化 → 导航栏设置」）
+                  const PeekSectionTitle('导航栏设置'),
+                  PeekTile(
+                    icon: Icons.view_sidebar_outlined,
+                    title: '导航栏样式',
+                    subtitle: NavStyle.fromName(
+                            Store.get<String>('navStyle', 'classic'))
+                        .label,
+                    onTap: _pickNavStyle,
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(18, 2, 18, 14),
+                    child: Text(
+                      '横屏模式下将显示侧边导航栏，竖屏模式下将显示底部导航栏',
+                      style: TextStyle(
+                          fontSize: 11.5, color: PeekColors.hint),
+                    ),
+                  ),
                 ],
               ),
             ),
@@ -276,5 +294,46 @@ class _AppearancePageState extends State<AppearancePage> {
         ),
       ),
     );
+  }
+
+  /// 导航栏样式（原版 6 选 1）
+  Future<void> _pickNavStyle() async {
+    final cur = NavStyle.fromName(Store.get<String>('navStyle', 'classic'));
+    final picked = await showModalBottomSheet<NavStyle>(
+      context: context,
+      backgroundColor: PeekColors.surfaceContainer,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(18, 16, 18, 6),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text('导航栏样式',
+                    style: TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w600,
+                        color: PeekColors.onSurface)),
+              ),
+            ),
+            for (final s in NavStyle.values)
+              ListTile(
+                dense: true,
+                title: Text(s.label,
+                    style: const TextStyle(fontSize: 13.5)),
+                trailing: s == cur
+                    ? Icon(Icons.check, size: 18, color: PeekColors.primary)
+                    : null,
+                onTap: () => Navigator.of(ctx).pop(s),
+              ),
+            const SizedBox(height: 10),
+          ],
+        ),
+      ),
+    );
+    if (picked == null) return;
+    await Store.set('navStyle', picked.name);
+    if (mounted) setState(() {});
   }
 }

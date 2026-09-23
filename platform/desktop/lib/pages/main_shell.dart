@@ -135,6 +135,7 @@ class _MainShellState extends State<MainShell> {
         items: items,
         index: index,
         onChanged: (i) => _go(i, items),
+        navStyle: NavStyle.fromName(Store.get<String>('navStyle', 'classic')),
         builder: (context, showRail) => IndexedStack(
           index: index,
           children: [for (final it in items) _pageFor(it.id)],
