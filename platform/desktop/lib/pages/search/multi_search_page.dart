@@ -387,6 +387,8 @@ class _MultiSearchPageState extends State<MultiSearchPage> {
           app.setSearchOnlyDefaultSource(!app.searchOnlyDefaultSource);
         } else if (v == 'blocked') {
           _showBlockSheet(app);
+        } else if (v == 'timeout') {
+          _showTimeoutSheet(app);
         } else if (v == 'auto') {
           Navigator.of(context).push(
             MaterialPageRoute(
@@ -423,11 +425,86 @@ class _MultiSearchPageState extends State<MultiSearchPage> {
           height: 40,
           child: Text('参与搜索的源', style: TextStyle(fontSize: 13)),
         ),
+        PopupMenuItem(
+          value: 'timeout',
+          height: 40,
+          child: Row(
+            children: [
+              const Expanded(
+                  child: Text('单源搜索超时', style: TextStyle(fontSize: 13))),
+              Text('${app.searchTimeoutSeconds}s',
+                  style: TextStyle(fontSize: 12, color: PeekColors.primary)),
+            ],
+          ),
+        ),
       ],
     );
   }
 
   // ------------------------------------------------------------ 弹层
+
+  /// 调节单源搜索超时。
+  ///
+  /// 为什么要给用户这个开关：93 个站源并发时，慢源可能在默认超时之后才
+  /// 返回。调大能捞回这些结果，代价是「搜索中」更久；调小则更快出结果。
+  Future<void> _showTimeoutSheet(AppState app) async {
+    int cur = app.searchTimeoutSeconds;
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: PeekColors.surfaceContainer,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheet) => Padding(
+          padding: const EdgeInsets.fromLTRB(18, 16, 18, 22),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Text('单源搜索超时',
+                      style: TextStyle(
+                          fontSize: 15,
+                          fontWeight: FontWeight.w600,
+                          color: PeekColors.onSurface)),
+                  const Spacer(),
+                  Text('$cur 秒',
+                      style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                          color: PeekColors.primary)),
+                ],
+              ),
+              const SizedBox(height: 4),
+              Text('超时更短出结果更快，更长能捞回慢源',
+                  style: TextStyle(fontSize: 12, color: PeekColors.hint)),
+              Slider(
+                value: cur.toDouble(),
+                min: 5,
+                max: 60,
+                divisions: 11,
+                label: '$cur 秒',
+                onChanged: (v) {
+                  setSheet(() => cur = v.round());
+                },
+                onChangeEnd: (v) async {
+                  await app.setSearchTimeoutSeconds(v.round());
+                },
+              ),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text('5 秒（最快）',
+                      style: TextStyle(fontSize: 11, color: PeekColors.hint)),
+                  Text('60 秒（最全）',
+                      style: TextStyle(fontSize: 11, color: PeekColors.hint)),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 
   /// 逐源勾选是否参与搜索（原版 `t4_blocked_search_sources`）
   Future<void> _showBlockSheet(AppState app) async {

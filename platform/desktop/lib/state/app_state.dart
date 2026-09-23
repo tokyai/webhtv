@@ -495,12 +495,19 @@ class AppState extends ChangeNotifier {
   }) async {
     final list = searchSources(onlyDefault: onlyDefault);
     var done = 0;
+    // 单源超时。
+    //
+    // 原为固定 12 秒，实测**偏短**：93 个站源同时并发时，源服务要现拉现解析，
+    // 部分秒播源会排队到 12 秒之后才返回（实测瓜子单站就要 1.5s，并发下更久），
+    // 一律被砍掉 → 用户看到「搜不到」。
+    //
+    // 折中方案：默认放宽到 20 秒。用户在「设置 → 搜索」里可调
+    // （`searchTimeoutSeconds`，范围 5–60）。
+    final timeout = Duration(seconds: searchTimeoutSeconds);
     final futures = list.map((site) async {
       List<Vod> items = const <Vod>[];
       try {
-        items = await _svc
-            .searchOf(site, keyword)
-            .timeout(const Duration(seconds: 12));
+        items = await _svc.searchOf(site, keyword).timeout(timeout);
       } catch (_) {
         items = const <Vod>[];
       } finally {
@@ -509,6 +516,17 @@ class AppState extends ChangeNotifier {
       }
     }).toList();
     await Future.wait(futures);
+  }
+
+  /// 单源搜索超时（秒）。默认 20。
+  int get searchTimeoutSeconds {
+    final v = Store.get<int>('searchTimeoutSeconds', 20);
+    return v.clamp(5, 60);
+  }
+
+  Future<void> setSearchTimeoutSeconds(int v) async {
+    await Store.set('searchTimeoutSeconds', v.clamp(5, 60));
+    notifyListeners();
   }
 
   Future<void> loadHotWords() async {
