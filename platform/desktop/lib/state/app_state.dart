@@ -1,10 +1,8 @@
 import 'dart:async';
-import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 
 import '../backend/source_config.dart';
-import '../core/http.dart';
 import '../core/netdisk_sources.dart';
 import '../core/storage.dart';
 import '../core/utils.dart';
@@ -14,6 +12,34 @@ import '../tvbox/spider.dart';
 
 /// 结果视图模式（原版搜索页「视图模式」两选项）。
 enum ViewMode { grid, list }
+
+/// 热搜条目。
+///
+/// B 站热搜接口（`/x/web-interface/search/square`）只稳定返回 `keyword`，
+/// 因此 [cover] / [score] 都是**可选**的：拿不到就渲染成纯文字 chip。
+/// 之所以不直接用 `String`，是因为原版热搜榜带封面与热度数字，
+/// 这个结构给未来接入更丰富的接口留了位置，且不必改动调用方。
+@immutable
+class HotWord {
+  const HotWord(this.keyword, {this.cover, this.score});
+
+  final String keyword;
+
+  /// 封面图 URL（可选）。
+  final String? cover;
+
+  /// 热度数值（可选，原版显示为 `51,352`）。
+  final int? score;
+
+  bool get hasCover => cover != null && cover!.isNotEmpty;
+
+  @override
+  bool operator ==(Object other) =>
+      other is HotWord && other.keyword == keyword;
+
+  @override
+  int get hashCode => keyword.hashCode;
+}
 
 /// 主题模式（原版「设置 → 外观与语言 → 主题模式」，3 个单选项）。
 enum PeekThemeMode { light, dark, system }
@@ -92,6 +118,17 @@ class AppState extends ChangeNotifier {
 
   // ---------------- 搜索 ----------------
   final List<String> hotWords = <String>[];
+
+  /// 热搜条目（带可选封面与热度）。
+  ///
+  /// ⚠️ 以前只有 `hotWords`（纯字符串）且**全工程没有任何 UI 消费方** ——
+  /// 数据一直在拉，界面上却看不到。现在补上渲染层，并把条目结构化，
+  /// 以便展示原版那样的「封面 + 点击数」。
+  ///
+  /// B 站热搜接口只给 `keyword`，所以封面/热度是可选的：拿不到就退回
+  /// 纯文字 chip，不会因为缺字段而渲染失败。
+  final List<HotWord> hotItems = <HotWord>[];
+
   bool loadingHot = false;
 
   // ---------------------------------------------------------------------------
@@ -545,42 +582,82 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// 加载热搜榜。
+  ///
+  /// ## 为什么**不用** B 站 `search/square` 接口
+  ///
+  /// 这个接口原本就在用，但实测它的返回是**B 站全站热搜**，而不是影视热搜：
+  ///
+  /// ```
+  ///  1. 习近平离京对美国进行国事访问      ← 时政，影视 App 不该展示
+  ///  2. 张展硕200米自由泳破纪录夺冠        ← 体育
+  ///  5. 持股过节还是持币过节              ← 财经
+  /// 24. 莫斯科遭最大规模无人机袭击        ← 国际新闻
+  /// 28. 原神沃雅妮莎角色预告              ← 游戏
+  /// ```
+  ///
+  /// 30 条里真正跟「看剧」相关的不到 5 条，而且混入了不应在影视应用里
+  /// 呈现的时政内容。换言之：**数据源选错了**，不是解析问题。
+  ///
+  /// ## 现在的做法
+  ///
+  /// 直接用一份**内置的影视热播片单**（剧 / 影 / 综 / 动漫混合）。
+  /// 好处是：内容可控、与 App 主题一致、离线可用、不会再被上游接口的
+  /// 内容变化影响。用户点任意一条都是有效的搜索词。
+  ///
+  /// 保留 [loadingHot] 的语义（供界面显示加载态），此处同步完成。
   Future<void> loadHotWords() async {
     if (hotWords.isNotEmpty || loadingHot) return;
     loadingHot = true;
     notifyListeners();
-    try {
-      final text = await Http.getText(
-        'https://api.bilibili.com/x/web-interface/search/square?limit=30',
-      );
-      final json = jsonDecode(text) as Map<String, dynamic>;
-      final data = json['data'] as Map<String, dynamic>?;
-      final trending = data?['trending'] as Map<String, dynamic>?;
-      final list = trending?['list'] as List? ?? const [];
-      for (final item in list) {
-        if (item is Map && item['keyword'] != null) {
-          hotWords.add(item['keyword'].toString());
-        }
-      }
-    } catch (_) {
-      hotWords.addAll(_fallbackHot);
-    }
-    if (hotWords.isEmpty) hotWords.addAll(_fallbackHot);
+
+    hotWords.addAll(_hotList.map((e) => e.keyword));
+    hotItems.addAll(_hotList);
+
     loadingHot = false;
     notifyListeners();
   }
 
-  static const _fallbackHot = <String>[
+  /// 影视热播榜（内置）。
+  ///
+  /// `score` 只用于展示排序权重，非真实播放量 —— 不臆造具体数字，
+  /// 统一用一个递减的展示值，避免让用户误认为是有据可查的播放数据。
+  static final List<HotWord> _hotList = <HotWord>[
+    for (var i = 0; i < _hotTitles.length; i++)
+      HotWord(_hotTitles[i], score: _hotTitles.length - i),
+  ];
+
+  static const _hotTitles = <String>[
+    '凡人修仙传',
     '庆余年',
+    '狂飙',
     '与凤行',
     '繁花',
+    '长相思',
+    '莲花楼',
+    '苍兰诀',
+    '甄嬛传',
+    '琅琊榜',
+    '三体',
+    '隐秘的角落',
+    '漫长的季节',
+    '开端',
+    '梦华录',
+    '星汉灿烂',
+    '去有风的地方',
+    '苍山洱海',
+    '唐朝诡事录',
+    '猎罪图鉴',
     '南来北往',
-    '大唐狄公案',
-    '在暴雪时分',
-    '如果奔跑是我的人生',
-    '狗剩快跑',
-    '飞驰人生2',
+    '唐人街探案',
+    '流浪地球',
     '热辣滚烫',
+    '飞驰人生',
+    '满江红',
+    '孤注一掷',
+    '奥本海默',
+    '灌篮高手',
+    '咒术回战',
   ];
 
   // ---------------------------------------------------------------------------
