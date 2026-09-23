@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -12,6 +13,7 @@ import '../../core/debug_log.dart';
 import '../../core/storage.dart';
 import '../../core/theme.dart';
 import '../../core/utils.dart';
+import '../../core/window.dart';
 import '../../state/app_state.dart';
 import '../../tvbox/backend_bridge.dart';
 import '../../tvbox/models.dart';
@@ -535,6 +537,8 @@ class _PlayerPageState extends State<PlayerPage> {
         },
         child: GestureDetector(
           onTapUp: _tapSeek,
+          // 桌面端：播放器上点鼠标右键切换全屏（对齐原版行为）
+          onSecondaryTapUp: (_) => _toggleFullscreen(),
           onDoubleTap: _locked ? null : () => _player.playOrPause(),
           onLongPressStart: _locked
               ? null
@@ -1000,8 +1004,16 @@ class _PlayerPageState extends State<PlayerPage> {
     );
   }
 
+  /// 切换全屏。
+  ///
+  /// * 桌面端（Windows）：直接调 `user32!ShowWindow` 最大化/还原窗口，
+  ///   效果等同点标题栏最大化按钮；右键与工具栏「全屏」按钮共用此逻辑。
+  /// * 移动端：切换系统 UI 可见性（沉浸式）。
   void _toggleFullscreen() {
-    // 桌面端由系统窗口管理器接管，移动端切换系统 UI 可见性
+    if (Platform.isWindows) {
+      DesktopWindow.toggleFullscreen();
+      return;
+    }
     SystemChrome.setEnabledSystemUIMode(
       _showControls ? SystemUiMode.immersiveSticky : SystemUiMode.edgeToEdge,
     );

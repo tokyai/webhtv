@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -9,6 +10,7 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 import '../../core/storage.dart';
 import '../../core/theme.dart';
 import '../../core/utils.dart';
+import '../../core/window.dart';
 import '../../player/danmaku/danmaku_controller.dart';
 import '../../player/danmaku/danmaku_overlay.dart';
 import '../../player/danmaku/danmaku_session.dart';
@@ -259,6 +261,17 @@ class _DirectPlayerPageState extends State<DirectPlayerPage> {
     if (_showControls) _scheduleHide();
   }
 
+  /// 切换全屏。桌面端（Windows）最大化/还原窗口，移动端切换系统 UI。
+  void _toggleFullscreen() {
+    if (Platform.isWindows) {
+      DesktopWindow.toggleFullscreen();
+      return;
+    }
+    SystemChrome.setEnabledSystemUIMode(
+      _showControls ? SystemUiMode.immersiveSticky : SystemUiMode.edgeToEdge,
+    );
+  }
+
   static String _fmt(Duration d) {
     final h = d.inHours;
     final m = d.inMinutes % 60;
@@ -277,6 +290,8 @@ class _DirectPlayerPageState extends State<DirectPlayerPage> {
       body: GestureDetector(
         behavior: HitTestBehavior.opaque,
         onTap: _toggleControls,
+        // 桌面端：播放器上点鼠标右键切换全屏（对齐原版行为）
+        onSecondaryTapUp: (_) => _toggleFullscreen(),
         child: Stack(
           fit: StackFit.expand,
           children: [
