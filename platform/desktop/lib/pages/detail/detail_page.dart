@@ -521,8 +521,111 @@ class _DetailPageState extends State<DetailPage> {
     );
   }
 
-  Widget _tabBody(Vod vod) {
-    switch (_tab) {
+  /// 快搜结果的按源计数（源 chips 用）：站名 → 命中数
+  Map<String, int> get _quickSiteCount {
+    final m = <String, int>{};
+    for (final q in _quick) {
+      m[q.site.name] = (m[q.site.name] ?? 0) + 1;
+    }
+    return m;
+  }
+
+  /// 快搜结果行：海报 + 标题 + 题材标签（原版快搜卡观感）
+  Widget _quickRow(SiteVod q) {
+    final tags = <String>[
+      if (q.vod.typeName.isNotEmpty) q.vod.typeName,
+      if (q.vod.year.isNotEmpty) q.vod.year,
+      if (q.vod.area.isNotEmpty) q.vod.area,
+      if (q.vod.remarks.isNotEmpty) q.vod.remarks,
+    ];
+    return InkWell(
+      onTap: () => Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => DetailPage(
+            site: q.site,
+            vodId: q.vod.id,
+            preview: q.vod,
+          ),
+        ),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 7),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            ClipRRect(
+              borderRadius: BorderRadius.circular(5),
+              child: SizedBox(
+                width: 46,
+                height: 62,
+                child: q.vod.pic.isEmpty
+                    ? Container(color: PeekColors.card)
+                    : CachedNetworkImage(
+                        imageUrl: q.vod.pic,
+                        httpHeaders: q.vod.picHeaders,
+                        fit: BoxFit.cover,
+                        errorWidget: (_, __, ___) =>
+                            Container(color: PeekColors.card),
+                      ),
+              ),
+            ),
+            const SizedBox(width: 11),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(q.vod.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                          fontSize: 13.5, color: PeekColors.onSurface)),
+                  const SizedBox(height: 6),
+                  Row(
+                    children: [
+                      Icon(Icons.folder_outlined,
+                          size: 12, color: PeekColors.hint),
+                      const SizedBox(width: 4),
+                      Flexible(
+                        child: Text(q.site.name,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                                fontSize: 11.5, color: PeekColors.hint)),
+                      ),
+                    ],
+                  ),
+                  if (tags.isNotEmpty) ...[
+                    const SizedBox(height: 6),
+                    Wrap(
+                      spacing: 5,
+                      runSpacing: 4,
+                      children: [
+                        for (final t in tags)
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 5, vertical: 1.5),
+                            decoration: BoxDecoration(
+                              color: PeekColors.surfaceContainerHigh,
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                            child: Text(t,
+                                style: TextStyle(
+                                    fontSize: 10.5,
+                                    color: PeekColors.railIdle)),
+                          ),
+                      ],
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _tabBody(Vod vod) {    switch (_tab) {
       case 1:
         if (_loadingRec) {
           return const SizedBox(
@@ -574,65 +677,102 @@ class _DetailPageState extends State<DetailPage> {
         return Padding(
           padding: const EdgeInsets.fromLTRB(18, 6, 18, 0),
           child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // 「进入多元搜索页」—— 原版快搜 tab 的完整形态
-              // （侧边栏 + 分源分组），这里给一个直达入口
-              Align(
-                alignment: Alignment.centerRight,
-                child: TextButton.icon(
-                  onPressed: _openMultiSearch,
-                  icon: const Icon(Icons.travel_explore, size: 16),
-                  label: const Text('打开多元搜索页',
-                      style: TextStyle(fontSize: 12.5)),
-                  style: TextButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(horizontal: 8),
-                    minimumSize: const Size(0, 30),
-                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                  ),
-                ),
-              ),
-              for (final q in _quick.take(12))
-                ListTile(
-                  dense: true,
-                  contentPadding: EdgeInsets.zero,
-                  leading: ClipRRect(
-                    borderRadius: BorderRadius.circular(5),
-                    child: SizedBox(
-                      width: 42,
-                      height: 58,
-                      child: q.vod.pic.isEmpty
-                          ? Container(color: PeekColors.card)
-                          : CachedNetworkImage(
-                              imageUrl: q.vod.pic,
-                              httpHeaders: q.vod.picHeaders,
-                              fit: BoxFit.cover,
-                              errorWidget: (_, __, ___) =>
-                                  Container(color: PeekColors.card),
+              // 顶部一行：搜索框（预填片名）+ 直达多元搜索页
+              Row(
+                children: [
+                  Expanded(
+                    child: Container(
+                      height: 36,
+                      padding: const EdgeInsets.symmetric(horizontal: 10),
+                      decoration: BoxDecoration(
+                        color: PeekColors.surfaceContainerHigh,
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(Icons.search,
+                              size: 16, color: PeekColors.hint),
+                          const SizedBox(width: 7),
+                          Expanded(
+                            child: Text(
+                              _vod?.name ?? '',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                  fontSize: 12.5, color: PeekColors.hint),
                             ),
-                    ),
-                  ),
-                  title: Text(q.vod.name,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(fontSize: 13.5)),
-                  subtitle: Text(
-                    '${q.site.name}${q.vod.remarks.isEmpty ? '' : ' · ${q.vod.remarks}'}',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(fontSize: 11.5, color: PeekColors.hint),
-                  ),
-                  trailing: Icon(Icons.chevron_right,
-                      size: 18, color: PeekColors.railIdle),
-                  onTap: () => Navigator.of(context).push(
-                    MaterialPageRoute(
-                      builder: (_) => DetailPage(
-                        site: q.site,
-                        vodId: q.vod.id,
-                        preview: q.vod,
+                          ),
+                        ],
                       ),
                     ),
                   ),
+                  const SizedBox(width: 8),
+                  IconButton(
+                    tooltip: '打开多元搜索页',
+                    onPressed: _openMultiSearch,
+                    icon: const Icon(Icons.travel_explore, size: 19),
+                  ),
+                ],
+              ),
+              // 源 chips：每个源显示 `站名 + 命中数`，当前源带 ✓
+              if (_quickSiteCount.isNotEmpty) ...[
+                const SizedBox(height: 8),
+                SizedBox(
+                  height: 30,
+                  child: ListView.separated(
+                    scrollDirection: Axis.horizontal,
+                    itemCount: _quickSiteCount.length,
+                    separatorBuilder: (_, __) => const SizedBox(width: 7),
+                    itemBuilder: (_, i) {
+                      final e = _quickSiteCount.entries.elementAt(i);
+                      final cur = e.key == widget.site.name;
+                      return Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 5),
+                        decoration: BoxDecoration(
+                          color: cur
+                              ? PeekColors.primaryContainer
+                              : PeekColors.surfaceContainerHigh,
+                          borderRadius: BorderRadius.circular(7),
+                          border: Border.all(
+                            color: cur
+                                ? PeekColors.primary
+                                : Colors.transparent,
+                          ),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              e.key,
+                              style: TextStyle(
+                                fontSize: 11.5,
+                                color: cur
+                                    ? PeekColors.onPrimaryContainer
+                                    : PeekColors.onSurfaceVariant,
+                              ),
+                            ),
+                            const SizedBox(width: 5),
+                            Text('${e.value}',
+                                style: TextStyle(
+                                    fontSize: 11, color: PeekColors.hint)),
+                            if (cur) ...[
+                              const SizedBox(width: 4),
+                              Icon(Icons.check,
+                                  size: 12,
+                                  color: PeekColors.onPrimaryContainer),
+                            ],
+                          ],
+                        ),
+                      );
+                    },
+                  ),
                 ),
+              ],
+              const SizedBox(height: 6),
+              for (final q in _quick.take(12)) _quickRow(q),
             ],
           ),
         );
