@@ -461,6 +461,10 @@ class AppState extends ChangeNotifier {
   }
 
   /// 全站源聚合搜索。
+  ///
+  /// ⚠️ 单源超时**必须**与 [searchBySource] 保持一致（都读 [searchTimeoutSeconds]）。
+  /// 早期这里写死 12 秒，导致走这条路径的入口（当时的顶栏放大镜 →
+  /// 旧 `SearchPage`）在 93 源并发下把慢源全砍掉，表现为「搜不到」。
   Future<List<SiteVod>> searchAll(
     String keyword, {
     void Function(int done, int total)? onProgress,
@@ -469,11 +473,10 @@ class AppState extends ChangeNotifier {
     final list = searchSources(onlyDefault: onlyDefault);
     final out = <SiteVod>[];
     var done = 0;
+    final timeout = Duration(seconds: searchTimeoutSeconds);
     final futures = list.map((site) async {
       try {
-        final r = await _svc
-            .searchOf(site, keyword)
-            .timeout(const Duration(seconds: 12));
+        final r = await _svc.searchOf(site, keyword).timeout(timeout);
         if (r.isNotEmpty) out.addAll(r.map((v) => SiteVod(site, v)));
       } catch (_) {
         // 单个站源失败不影响整体聚合
