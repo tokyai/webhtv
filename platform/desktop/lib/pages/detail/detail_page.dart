@@ -661,71 +661,113 @@ class _DetailPageState extends State<DetailPage> {
   Widget _lineSelector(List<PlayLine> lines) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(18, 0, 18, 8),
-      child: Row(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('播放源',
-              style: TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w600,
-                  color: PeekColors.onSurface)),
-          const SizedBox(width: 14),
-          PopupMenuButton<int>(
-            initialValue: _lineIndex,
-            onSelected: (v) => setState(() => _lineIndex = v),
-            color: PeekColors.surfaceContainerHigh,
-            itemBuilder: (_) => [
-              for (var i = 0; i < lines.length; i++)
-                PopupMenuItem(
-                  value: i,
-                  height: 38,
-                  child: Text(
-                    '《${lines[i].name}》  ${lines[i].episodes.length}集',
-                    style: TextStyle(
-                      fontSize: 13,
-                      color: i == _lineIndex
-                          ? PeekColors.primary
-                          : PeekColors.onSurface,
-                    ),
+          Row(
+            children: [
+              Text('播放源',
+                  style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                      color: PeekColors.onSurface)),
+              const SizedBox(width: 10),
+              Text(
+                '合集 · 正在播放：${_lineIndex + 1}',
+                style: TextStyle(fontSize: 11.5, color: PeekColors.hint),
+              ),
+              const Spacer(),
+              // 原版 `changeable` 为真时才有「换源」入口
+              if (widget.site.changeable)
+                TextButton.icon(
+                  onPressed: _openMultiSearch,
+                  icon: const Icon(Icons.swap_horiz, size: 16),
+                  label: const Text('换源', style: TextStyle(fontSize: 12.5)),
+                  style: TextButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                    minimumSize: const Size(0, 32),
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                   ),
                 ),
+              TextButton(
+                onPressed: () => _openAllEpisodes(lines),
+                child: const Text('查看全部',
+                    style: TextStyle(fontSize: 12.5)),
+              ),
             ],
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
-              decoration: BoxDecoration(
-                color: PeekColors.primaryContainer,
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Row(
-                children: [
-                  Text(
-                    '《${lines[_lineIndex].name}》',
-                    style: TextStyle(
-                        fontSize: 12.5, color: PeekColors.onPrimaryContainer),
+          ),
+          const SizedBox(height: 4),
+          // 线路 tabs：原版详情页底部横排线路按钮
+          // （如 `夸克原画#01 / 夸克极速#01 / 夸克原画#02`）
+          SizedBox(
+            height: 36,
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              itemCount: lines.length,
+              separatorBuilder: (_, __) => const SizedBox(width: 8),
+              itemBuilder: (_, i) {
+                final sel = i == _lineIndex;
+                return InkWell(
+                  onTap: () => setState(() {
+                    _lineIndex = i;
+                    // 原版：切换线路后左下角提示「正在切换线路至「XXX」」
+                    peekToast(context, '正在切换线路至「${lines[i].name}」');
+                  }),
+                  borderRadius: BorderRadius.circular(8),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 14, vertical: 7),
+                    decoration: BoxDecoration(
+                      color: sel
+                          ? PeekColors.primaryContainer
+                          : PeekColors.surfaceContainerHigh,
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(
+                        color:
+                            sel ? PeekColors.primary : Colors.transparent,
+                      ),
+                    ),
+                    child: Text(
+                      lines[i].name,
+                      style: TextStyle(
+                        fontSize: 12.5,
+                        fontWeight:
+                            sel ? FontWeight.w600 : FontWeight.w400,
+                        color: sel
+                            ? PeekColors.onPrimaryContainer
+                            : PeekColors.onSurfaceVariant,
+                      ),
+                    ),
                   ),
-                  const SizedBox(width: 4),
-                  Icon(Icons.arrow_drop_down,
-                      size: 18, color: PeekColors.onPrimaryContainer),
-                ],
-              ),
+                );
+              },
             ),
           ),
-          const Spacer(),
-          // 原版 `changeable` 为真时才有「换源」入口 ——
-          // 进入多元搜索页，点结果直接换到该源继续播
-          if (widget.site.changeable)
-            TextButton.icon(
-              onPressed: _openMultiSearch,
-              icon: const Icon(Icons.swap_horiz, size: 16),
-              label: const Text('换源', style: TextStyle(fontSize: 12.5)),
-              style: TextButton.styleFrom(
-                padding: const EdgeInsets.symmetric(horizontal: 8),
-                minimumSize: Size(0, 32),
-                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-              ),
-            ),
-          Text('共 ${lines[_lineIndex].episodes.length} 集',
-              style: TextStyle(fontSize: 12, color: PeekColors.hint)),
         ],
+      ),
+    );
+  }
+
+  /// 「查看全部」面板 —— 原版：`合集` 标题 + 五图标工具条
+  /// （排序 / 字号 / 顺序 / 定位 / 关闭）+ 分段页码 + 剧集网格。
+  Future<void> _openAllEpisodes(List<PlayLine> lines) async {
+    final episodes = lines.isEmpty ? <Episode>[] : lines[_lineIndex].episodes;
+    if (episodes.isEmpty) return;
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: PeekColors.surfaceContainer,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) => _AllEpisodesSheet(
+        title: '合集',
+        episodes: episodes,
+        progressIndex: _progressIndex,
+        onPick: (i) {
+          Navigator.of(ctx).pop();
+          _play(i);
+        },
       ),
     );
   }
@@ -815,4 +857,209 @@ class _DetailPageState extends State<DetailPage> {
 
   String _stripHtml(String s) =>
       s.replaceAll(RegExp(r'<[^>]+>'), '').replaceAll('&nbsp;', ' ').trim();
+}
+
+/// 「查看全部」剧集面板。
+///
+/// 原版形态：`合集` 标题 + 一条五图标工具条
+/// （↓排序 / T字号 / ⇅顺序 / ⊙定位 / ✕关闭）
+/// + 分段页码（`1-50 / 51-100 / 101-150 / …`）+ 剧集网格。
+class _AllEpisodesSheet extends StatefulWidget {
+  final String title;
+  final List<Episode> episodes;
+  final int progressIndex;
+  final ValueChanged<int> onPick;
+
+  const _AllEpisodesSheet({
+    required this.title,
+    required this.episodes,
+    required this.progressIndex,
+    required this.onPick,
+  });
+
+  @override
+  State<_AllEpisodesSheet> createState() => _AllEpisodesSheetState();
+}
+
+class _AllEpisodesSheetState extends State<_AllEpisodesSheet> {
+  /// 每段的集数（原版按 50 一段分页）
+  static const int _segSize = 50;
+
+  /// 倒序显示（原版工具条第 3 个图标的语义）
+  bool _reversed = false;
+
+  /// 每行集数（原版工具条第 2 个图标调整字号/密度）
+  int _perRow = 5;
+
+  late int _segment = 0;
+
+  int get _segmentCount =>
+      (widget.episodes.length / _segSize).ceil().clamp(1, 999);
+
+  List<int> get _indexes {
+    final start = _segment * _segSize;
+    final end =
+        (start + _segSize).clamp(0, widget.episodes.length).toInt();
+    final list = [for (var i = start; i < end; i++) i];
+    return _reversed ? list.reversed.toList() : list;
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    // 默认定位到当前播放集所在分段
+    if (widget.progressIndex >= 0) {
+      _segment = (widget.progressIndex ~/ _segSize).clamp(0, _segmentCount - 1);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final idx = _indexes;
+    return SafeArea(
+      child: SizedBox(
+        height: MediaQuery.of(context).size.height * 0.66,
+        child: Column(
+          children: [
+            // 标题 + 五图标工具条
+            Padding(
+              padding: const EdgeInsets.fromLTRB(18, 14, 8, 6),
+              child: Row(
+                children: [
+                  Text(widget.title,
+                      style: TextStyle(
+                          fontSize: 15,
+                          fontWeight: FontWeight.w600,
+                          color: PeekColors.onSurface)),
+                  const Spacer(),
+                  IconButton(
+                    tooltip: _reversed ? '恢复顺序' : '倒序',
+                    onPressed: () => setState(() => _reversed = !_reversed),
+                    icon: Icon(
+                        _reversed
+                            ? Icons.arrow_upward
+                            : Icons.arrow_downward,
+                        size: 18),
+                  ),
+                  IconButton(
+                    tooltip: '每行集数',
+                    onPressed: () => setState(
+                        () => _perRow = _perRow == 5 ? 8 : (_perRow == 8 ? 4 : 5)),
+                    icon: const Icon(Icons.text_fields, size: 18),
+                  ),
+                  IconButton(
+                    tooltip: '顺序',
+                    onPressed: () => setState(() => _reversed = !_reversed),
+                    icon: const Icon(Icons.swap_vert, size: 18),
+                  ),
+                  IconButton(
+                    tooltip: '定位到当前集',
+                    onPressed: widget.progressIndex >= 0
+                        ? () => setState(() {
+                              _segment = (widget.progressIndex ~/ _segSize)
+                                  .clamp(0, _segmentCount - 1);
+                            })
+                        : null,
+                    icon: const Icon(Icons.my_location, size: 18),
+                  ),
+                  IconButton(
+                    tooltip: '关闭',
+                    onPressed: () => Navigator.of(context).pop(),
+                    icon: const Icon(Icons.close, size: 18),
+                  ),
+                ],
+              ),
+            ),
+            // 分段页码
+            if (_segmentCount > 1)
+              SizedBox(
+                height: 34,
+                child: ListView.separated(
+                  scrollDirection: Axis.horizontal,
+                  padding: const EdgeInsets.symmetric(horizontal: 18),
+                  itemCount: _segmentCount,
+                  separatorBuilder: (_, __) => const SizedBox(width: 8),
+                  itemBuilder: (_, s) {
+                    final sel = s == _segment;
+                    final a = s * _segSize + 1;
+                    final b = ((s + 1) * _segSize)
+                        .clamp(0, widget.episodes.length)
+                        .toInt();
+                    return InkWell(
+                      onTap: () => setState(() => _segment = s),
+                      borderRadius: BorderRadius.circular(7),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 11, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: sel
+                              ? PeekColors.primaryContainer
+                              : PeekColors.surfaceContainerHigh,
+                          borderRadius: BorderRadius.circular(7),
+                        ),
+                        child: Text(
+                          '$a-$b',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: sel
+                                ? PeekColors.onPrimaryContainer
+                                : PeekColors.onSurfaceVariant,
+                          ),
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
+            const SizedBox(height: 6),
+            Expanded(
+              child: GridView.builder(
+                padding: const EdgeInsets.fromLTRB(18, 4, 18, 18),
+                gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: _perRow,
+                  mainAxisSpacing: 9,
+                  crossAxisSpacing: 9,
+                  childAspectRatio: 1.85,
+                ),
+                itemCount: idx.length,
+                itemBuilder: (_, i) {
+                  final real = idx[i];
+                  final sel = real == widget.progressIndex;
+                  return InkWell(
+                    onTap: () => widget.onPick(real),
+                    borderRadius: BorderRadius.circular(8),
+                    child: Container(
+                      alignment: Alignment.center,
+                      decoration: BoxDecoration(
+                        color: sel
+                            ? PeekColors.primaryContainer
+                            : PeekColors.surfaceContainerHigh,
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(
+                          color:
+                              sel ? PeekColors.primary : Colors.transparent,
+                        ),
+                      ),
+                      child: Text(
+                        widget.episodes[real].name,
+                        textAlign: TextAlign.center,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: sel
+                              ? PeekColors.onPrimaryContainer
+                              : PeekColors.onSurfaceVariant,
+                        ),
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }
