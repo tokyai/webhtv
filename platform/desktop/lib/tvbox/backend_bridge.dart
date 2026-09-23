@@ -38,6 +38,7 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
 import '../backend/source_client.dart';
+import '../core/debug_log.dart';
 import '../backend/source_config.dart';
 import '../backend/source_fetcher.dart';
 import '../backend/source_runtime.dart';
@@ -506,10 +507,16 @@ class SourceService {
   Future<List<Vod>> searchOf(Site site, String keyword) async {
     final api = _api;
     if (api == null) throw SpiderException('源服务未就绪');
+    final sw = Stopwatch()..start();
     try {
       final r = await api.search(_entryRaw(site), keyword, page: 1);
+      // 分源搜索的诊断日志：聚合搜索「某个源为什么没结果」全靠它定位
+      // （例如代理导致的全量 502，见 `SourceClient` 文档）。
+      DebugLog.add('SEARCH',
+          'OK ${site.name} n=${r.list.length} ${sw.elapsedMilliseconds}ms');
       return [for (final v in r.list) vodFromItem(v)];
     } catch (e) {
+      DebugLog.add('SEARCH', 'ERR ${site.name} ${sw.elapsedMilliseconds}ms $e');
       throw _toSpiderError(e);
     }
   }
